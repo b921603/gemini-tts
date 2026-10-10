@@ -16,28 +16,45 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      # 把 ffmpeg.wasm 以固定版本下載後放進網站 (同源自架,不依賴第三方 CDN)
+      # 把 ffmpeg.wasm 以固定版本下載後放進網站 (同源自架,不依賴第三方 CDN)。
+      # 失敗時會把原因直接寫進 Annotations,不需登入也看得到。
       - name: Vendor ffmpeg.wasm (pinned, single-thread core)
+        shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p .build && cd .build
-          npm init -y >/dev/null
-          npm install --no-audit --no-fund @ffmpeg/ffmpeg@0.12.15 @ffmpeg/core@0.12.10
+          set -uo pipefail
+          LOG="$RUNNER_TEMP/vendor.log"; : > "$LOG"
+          fail() {
+            local msg
+            msg=$(tail -n 25 "$LOG" | tr '\n\r' '||' | tr -d '%' | cut -c1-1200)
+            echo "::error title=Vendor step failed::$1 || $msg"
+            echo "----- full log -----"; cat "$LOG"
+            exit 1
+          }
+          mkdir -p .build || fail "mkdir .build"
+          cd .build || fail "cd .build"
+          npm init -y >>"$LOG" 2>&1 || fail "npm init"
+          npm install --no-audit --no-fund @ffmpeg/ffmpeg@0.12.10 @ffmpeg/core@0.12.10 >>"$LOG" 2>&1 || fail "npm install"
           cd ..
-          mkdir -p site/vendor/ffmpeg site/vendor/core
-          cp -r .build/node_modules/@ffmpeg/ffmpeg/dist/esm/. site/vendor/ffmpeg/
-          cp .build/node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js   site/vendor/core/
-          cp .build/node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.wasm site/vendor/core/
-          test -s site/vendor/ffmpeg/index.js
-          test -s site/vendor/ffmpeg/worker.js
-          test -s site/vendor/core/ffmpeg-core.wasm
+          FF=.build/node_modules/@ffmpeg/ffmpeg/dist/esm
+          CORE=.build/node_modules/@ffmpeg/core/dist/esm
+          {
+            echo "== ffmpeg package files =="; find .build/node_modules/@ffmpeg/ffmpeg -maxdepth 3 -type f | sort
+            echo "== core package files ==";   find .build/node_modules/@ffmpeg/core   -maxdepth 3 -type f | sort
+          } >>"$LOG" 2>&1
+          for f in "$FF/index.js" "$FF/worker.js" "$CORE/ffmpeg-core.js" "$CORE/ffmpeg-core.wasm"; do
+            [ -s "$f" ] || fail "missing file: $f"
+          done
+          mkdir -p site/vendor/ffmpeg site/vendor/core || fail "mkdir vendor"
+          cp -r "$FF"/. site/vendor/ffmpeg/ >>"$LOG" 2>&1 || fail "copy ffmpeg esm"
+          cp "$CORE/ffmpeg-core.js" "$CORE/ffmpeg-core.wasm" site/vendor/core/ >>"$LOG" 2>&1 || fail "copy core"
+          cat "$LOG"
           ls -lh site/vendor/ffmpeg site/vendor/core
 
       - uses: actions/configure-pages@v5
