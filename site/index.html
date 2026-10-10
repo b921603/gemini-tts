@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a73e8">
+<meta name="color-scheme" content="light dark">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Gemini TTS</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <h1>Gemini 3.8 TTS</h1>
+  <button id="installBtn" type="button" hidden>安裝到主畫面</button>
+</header>
+
+<main>
+  <p id="restoreNote" class="hint banner" hidden></p>
+
+  <!-- 1. API Key -->
+  <section class="card">
+    <h2>1. API Key</h2>
+    <div class="row">
+      <input id="apiKey" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="貼上你自己的 Gemini API Key">
+      <button id="keyToggle" type="button" class="small">顯示</button>
+    </div>
+    <label class="chk"><input type="checkbox" id="rememberKey"> 記住在此裝置（存於本機瀏覽器，勿在公用裝置勾選）</label>
+    <p class="hint">金鑰只會從你的瀏覽器直接送到 Google，不經過其他伺服器。
+      <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">取得金鑰</a>　
+      <button id="keyClear" type="button" class="link">清除金鑰</button></p>
+  </section>
+
+  <!-- 2. 文本 -->
+  <section class="card">
+    <h2>2. 文本</h2>
+    <div class="seg" role="radiogroup" aria-label="生成模式">
+      <label><input type="radio" name="mode" value="single"> 單人旁白</label>
+      <label><input type="radio" name="mode" value="multi"> 多人對話</label>
+    </div>
+    <div id="multiBox" hidden>
+      <label>講者名稱（逗號分隔，至少 2 位）
+        <input id="speakers" type="text" placeholder="Joe, Jane"></label>
+      <p class="hint">每行一句：<code>名稱: 內容</code>，或 <code>名稱[語氣]: 內容</code> 指定該句語氣。沒有「名稱:」開頭的行會接在上一句後面。</p>
+    </div>
+    <div class="chips" id="chips" aria-label="快速插入"></div>
+    <textarea id="text" rows="8" placeholder="輸入要生成的文本…"></textarea>
+    <div class="row between">
+      <span id="charCount" class="hint"></span>
+      <span class="row">
+        <label class="btn small">讀取 .txt<input type="file" id="txtFile" accept=".txt,text/plain" hidden></label>
+        <button id="textClear" type="button" class="small">清空</button>
+      </span>
+    </div>
+  </section>
+
+  <!-- 3. 人聲 -->
+  <section class="card">
+    <h2>3. 人聲與語氣</h2>
+    <div id="singleVoice">
+      <label>人聲
+        <button type="button" id="voiceBtn" class="voice-btn"></button></label>
+      <label>語氣 style
+        <input id="style" type="text" placeholder="例如 cheerful and friendly、whispering、溫暖沉穩"></label>
+    </div>
+    <div id="multiVoices" hidden></div>
+    <p class="hint">整段的情緒／語速寫在「語氣」；單一時間點的 <code>&lt;laugh&gt;</code> <code>&lt;sigh&gt;</code> <code>&lt;short pause&gt;</code> 直接寫進文本（標籤用英文）。</p>
+  </section>
+
+  <!-- 4. 輸出 -->
+  <section class="card">
+    <h2>4. 輸出設定</h2>
+    <div class="grid">
+      <label>模型
+        <select id="modelSel">
+          <option value="gemini-3.8-flash-tts">3.8 Flash TTS（高品質）</option>
+          <option value="gemini-3.8-flash-lite-tts">3.8 Flash-Lite TTS（快速省成本）</option>
+          <option value="__custom">自訂模型 ID…</option>
+        </select></label>
+      <label id="modelCustomWrap" hidden>自訂模型 ID
+        <input id="modelCustom" type="text" autocapitalize="off" spellcheck="false"></label>
+      <label>輸出格式
+        <select id="out_format">
+          <optgroup label="API 原生（無需 ffmpeg）">
+            <option value="wav">WAV（無損）</option>
+            <option value="pcm">原始 PCM L16（無檔頭）</option>
+            <option value="mulaw">G.711 μ-law</option>
+            <option value="alaw">G.711 A-law</option>
+          </optgroup>
+          <optgroup label="需 ffmpeg 轉檔（首次下載約 31 MB）">
+            <option value="mp3">MP3</option>
+            <option value="flac">FLAC</option>
+            <option value="ogg">OGG Vorbis</option>
+            <option value="opus">Opus</option>
+            <option value="m4a">M4A / AAC</option>
+          </optgroup>
+        </select></label>
+      <label>檔名（不含副檔名，留空自動命名）
+        <input id="filename" type="text" placeholder="tts_20261009_120000"></label>
+    </div>
+    <p id="ffNote" class="hint" hidden></p>
+
+    <details id="advanced">
+      <summary>進階選項</summary>
+      <div class="grid">
+        <label>取樣率 Hz（0＝預設 24000）<input id="sample_rate" type="number" min="0" max="192000" step="1000" inputmode="numeric"></label>
+        <label id="bitrateWrap">位元率
+          <select id="bitrate">
+            <option>64k</option><option>96k</option><option>128k</option><option>160k</option>
+            <option>192k</option><option>256k</option><option>320k</option>
+          </select></label>
+        <label>播放速度（0.25–4，ffmpeg）<input id="speed" type="number" min="0.25" max="4" step="0.05" inputmode="decimal"></label>
+        <label>失敗自動重試次數<input id="retries" type="number" min="0" max="10" inputmode="numeric"></label>
+        <label class="multi-only">段間靜音（毫秒，逐段合成時）<input id="gap_ms" type="number" min="0" max="5000" step="50" inputmode="numeric"></label>
+        <label class="single-only">長文自動分段字數上限（0＝不分段）<input id="max_chars" type="number" min="0" max="100000" step="100" inputmode="numeric"></label>
+      </div>
+      <label class="chk"><input type="checkbox" id="loudnorm"> 響度標準化 loudnorm（ffmpeg）</label>
+      <label class="chk"><input type="checkbox" id="keep_wav"> 經 ffmpeg 轉檔時，同時保留原始 WAV</label>
+      <label class="chk"><input type="checkbox" id="autoplay"> 生成後自動播放預覽</label>
+      <label class="chk multi-only"><input type="checkbox" id="conversational"> conversational 對話節奏（mode=conversational，被拒時自動退回）</label>
+      <label class="chk multi-only"><input type="checkbox" id="force_per_turn"> 強制逐段合成再拼接（超過 2 位或自訂人聲會自動啟用）</label>
+      <div class="row wrap">
+        <button type="button" id="preloadFf" class="small">預先下載 ffmpeg</button>
+        <button type="button" id="exportCfg" class="small">匯出設置</button>
+        <label class="btn small">匯入設置<input type="file" id="importCfg" accept="application/json,.json" hidden></label>
+        <button type="button" id="resetCfg" class="small danger">重設為預設</button>
+      </div>
+    </details>
+  </section>
+
+  <section id="results" aria-live="polite"></section>
+
+  <details id="logWrap" class="card">
+    <summary>執行紀錄</summary>
+    <pre id="log"></pre>
+  </details>
+  <div class="spacer"></div>
+</main>
+
+<div class="bar">
+  <progress id="prog" hidden></progress>
+  <p id="status" role="status"></p>
+  <div class="row">
+    <button id="genBtn" type="button" class="primary">生成音頻</button>
+    <button id="cancelBtn" type="button" hidden>取消</button>
+  </div>
+</div>
+
+<!-- 人聲選擇器 -->
+<dialog id="voiceDlg">
+  <div class="dlg-head">
+    <h3 id="voiceDlgTitle">選擇人聲</h3>
+    <button type="button" id="voiceClose" class="small">關閉</button>
+  </div>
+  <div class="tabs" role="tablist">
+    <button type="button" data-tab="direct" class="active">輸入名稱／ID</button>
+    <button type="button" data-tab="online">線上清單</button>
+    <button type="button" data-tab="builtin">內建 30 種</button>
+  </div>
+
+  <div class="tab" id="tab-direct">
+    <label>人聲名稱或 ID
+      <input id="voiceInput" type="text" autocapitalize="off" spellcheck="false" placeholder="Kore 或 voice_xxx"></label>
+    <button type="button" id="voiceUse" class="primary">使用這個人聲</button>
+  </div>
+
+  <div class="tab" id="tab-online" hidden>
+    <details>
+    <summary>篩選條件（語言／性別／音高／用途／關鍵字）</summary>
+    <div class="grid">
+      <label>語言代碼<input id="f_language_code" type="text" placeholder="en-US, ja-JP, zh-TW"></label>
+      <label>性別<input id="f_gender" type="text" placeholder="female, male"></label>
+      <label>音高<input id="f_pitch" type="text" placeholder="low, medium, high"></label>
+      <label>用途<input id="f_contexts" type="text" placeholder="Audiobook, News"></label>
+      <label>來源<input id="f_type" type="text" placeholder="prebuilt, prompted, replicated"></label>
+      <label>關鍵字<input id="f_search" type="text" placeholder="warm（中文語言找不到時用關鍵字）"></label>
+    </div>
+    <button type="button" id="voiceSearch" class="small" style="margin-top:10px">套用篩選並載入</button>
+    </details>
+    <p id="voiceMsg" class="hint"></p>
+    <ul id="voiceList" class="vlist"></ul>
+    <button type="button" id="voiceMore" class="small" hidden>載入更多</button>
+  </div>
+
+  <div class="tab" id="tab-builtin" hidden>
+    <div id="builtinGrid" class="bgrid"></div>
+  </div>
+</dialog>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

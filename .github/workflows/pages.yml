@@ -1,0 +1,48 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 把 ffmpeg.wasm 以固定版本下載後放進網站 (同源自架,不依賴第三方 CDN)
+      - name: Vendor ffmpeg.wasm (pinned, single-thread core)
+        run: |
+          set -euo pipefail
+          mkdir -p .build && cd .build
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund @ffmpeg/ffmpeg@0.12.15 @ffmpeg/core@0.12.10
+          cd ..
+          mkdir -p site/vendor/ffmpeg site/vendor/core
+          cp -r .build/node_modules/@ffmpeg/ffmpeg/dist/esm/. site/vendor/ffmpeg/
+          cp .build/node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js   site/vendor/core/
+          cp .build/node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.wasm site/vendor/core/
+          test -s site/vendor/ffmpeg/index.js
+          test -s site/vendor/ffmpeg/worker.js
+          test -s site/vendor/core/ffmpeg-core.wasm
+          ls -lh site/vendor/ffmpeg site/vendor/core
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
