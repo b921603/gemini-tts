@@ -37,16 +37,16 @@ jobs:
             echo "----- full log -----"; cat "$LOG"
             exit 1
           }
-          mkdir -p .build || fail "mkdir .build"
-          cd .build || fail "cd .build"
+          mkdir -p ffbuild || fail "mkdir ffbuild"
+          cd ffbuild || fail "cd ffbuild"
           npm init -y >>"$LOG" 2>&1 || fail "npm init"
           npm install --no-audit --no-fund @ffmpeg/ffmpeg@0.12.10 @ffmpeg/core@0.12.10 >>"$LOG" 2>&1 || fail "npm install"
           cd ..
-          FF=.build/node_modules/@ffmpeg/ffmpeg/dist/esm
-          CORE=.build/node_modules/@ffmpeg/core/dist/esm
+          FF=ffbuild/node_modules/@ffmpeg/ffmpeg/dist/esm
+          CORE=ffbuild/node_modules/@ffmpeg/core/dist/esm
           {
-            echo "== ffmpeg package files =="; find .build/node_modules/@ffmpeg/ffmpeg -maxdepth 3 -type f | sort
-            echo "== core package files ==";   find .build/node_modules/@ffmpeg/core   -maxdepth 3 -type f | sort
+            echo "== ffmpeg package files =="; find ffbuild/node_modules/@ffmpeg/ffmpeg -maxdepth 3 -type f | sort
+            echo "== core package files ==";   find ffbuild/node_modules/@ffmpeg/core   -maxdepth 3 -type f | sort
           } >>"$LOG" 2>&1
           for f in "$FF/index.js" "$FF/worker.js" "$CORE/ffmpeg-core.js" "$CORE/ffmpeg-core.wasm"; do
             [ -s "$f" ] || fail "missing file: $f"
