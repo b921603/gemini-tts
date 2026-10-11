@@ -129,6 +129,13 @@
         <label>輸出資料夾（相對路徑以 local 資料夾為基準）<input id="out_dir" type="text" spellcheck="false"></label>
         <label>ffmpeg.exe 路徑（留空＝自動尋找）<input id="ffmpeg_path" type="text" spellcheck="false" placeholder="例如 C:\\tools\\ffmpeg\\bin\\ffmpeg.exe"></label>
         <p id="ffStatus" class="hint"></p>
+        <label>開啟本機視窗使用的瀏覽器（下次啟動生效）
+          <select id="gui_browser">
+            <option value="auto">自動（優先 Chrome，其次 Edge）</option>
+            <option value="chrome">Chrome</option>
+            <option value="edge">Edge</option>
+            <option value="default">系統預設瀏覽器（一般分頁）</option>
+          </select></label>
         <label class="chk"><input type="checkbox" id="auto_save"> 生成後自動儲存到輸出資料夾</label>
         <div class="row wrap">
           <button type="button" id="openOut" class="small">開啟輸出資料夾</button>

@@ -4,7 +4,7 @@
 
 | | 網頁版（GitHub Pages / Android PWA） | 本機版（Windows，`啟動圖形介面.bat`） |
 |---|---|---|
-| 介面 | 瀏覽器、可安裝到手機主畫面 | Edge/Chrome 應用程式視窗（同一套介面） |
+| 介面 | 瀏覽器、可安裝到手機主畫面 | Chrome（優先）或 Edge 的應用程式視窗（可改，同一套介面） |
 | ffmpeg | ffmpeg.wasm（首次下載約 31 MB） | 電腦上的原生 ffmpeg（可一鍵安裝） |
 | 儲存 | 下載 / 分享到其他 App | 自動存入輸出資料夾 + 最近生成清單 |
 | API Key | 使用者自己輸入，存在瀏覽器 | 輸入或環境變數 `GEMINI_API_KEY`，可存成本機檔案 |

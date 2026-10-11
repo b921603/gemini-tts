@@ -65,6 +65,7 @@ export const DEFAULTS = {
   auto_save: true,              // (本機版) 生成後自動存進輸出資料夾
   out_dir: 'output',            // (本機版) 輸出資料夾
   ffmpeg_path: '',              // (本機版) ffmpeg.exe 路徑,留空=自動尋找
+  gui_browser: 'auto',          // (本機版) 開啟視窗用的瀏覽器: auto(優先 Chrome) / chrome / edge / default
 };
 
 // --------------------------------------------------------------------------- //

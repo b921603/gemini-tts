@@ -69,7 +69,7 @@ const BIND = [
   ['out_format', 'text'], ['sample_rate', 'int'], ['bitrate', 'text'], ['loudnorm', 'bool'],
   ['speed', 'float'], ['keep_wav', 'bool'], ['autoplay', 'bool'], ['retries', 'int'],
   ['conversational', 'bool'], ['force_per_turn', 'bool'], ['gap_ms', 'int'], ['max_chars', 'int'], ['style', 'text'],
-  ['batch', 'bool'], ['auto_save', 'bool'], ['out_dir', 'text'], ['ffmpeg_path', 'text'],
+  ['batch', 'bool'], ['auto_save', 'bool'], ['out_dir', 'text'], ['ffmpeg_path', 'text'], ['gui_browser', 'text'],
 ];
 
 function readField(k, t) {

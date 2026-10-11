@@ -474,16 +474,54 @@ class Handler(BaseHTTPRequestHandler):
 # --------------------------------------------------------------------------- #
 # 啟動
 # --------------------------------------------------------------------------- #
-def open_app_window(url: str) -> None:
-    if sys.platform == "win32":
-        pf, pf86, loc = (os.environ.get(k, "") for k in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"))
-        for exe in (f"{pf86}\\Microsoft\\Edge\\Application\\msedge.exe", f"{pf}\\Microsoft\\Edge\\Application\\msedge.exe",
-                    f"{pf}\\Google\\Chrome\\Application\\chrome.exe", f"{pf86}\\Google\\Chrome\\Application\\chrome.exe",
-                    f"{loc}\\Google\\Chrome\\Application\\chrome.exe"):
-            if exe and Path(exe).is_file():
-                subprocess.Popen([exe, f"--app={url}", "--window-size=760,980"])
-                return
+def _registry_app_path(exe: str) -> str | None:
+    """從 Windows 登錄檔 (App Paths) 找瀏覽器位置,涵蓋非標準安裝路徑"""
+    try:
+        import winreg
+        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            try:
+                with winreg.OpenKey(hive, rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}") as k:
+                    return winreg.QueryValue(k, None)
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def browser_paths(name: str) -> list[str]:
+    pf, pf86, loc = (os.environ.get(k, "") for k in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"))
+    if name == "chrome":
+        c = [f"{pf}\\Google\\Chrome\\Application\\chrome.exe", f"{pf86}\\Google\\Chrome\\Application\\chrome.exe",
+             f"{loc}\\Google\\Chrome\\Application\\chrome.exe", _registry_app_path("chrome.exe") or ""]
+    else:
+        c = [f"{pf86}\\Microsoft\\Edge\\Application\\msedge.exe", f"{pf}\\Microsoft\\Edge\\Application\\msedge.exe",
+             _registry_app_path("msedge.exe") or ""]
+    return [x for x in c if x and not x.startswith("\\")]
+
+
+def find_browser(pref: str = "auto") -> tuple[str | None, str | None]:
+    """依偏好找瀏覽器。auto = 優先 Chrome,其次 Edge;找不到偏好的就退而求其次。"""
+    order = {"chrome": ["chrome", "edge"], "edge": ["edge", "chrome"], "default": []}.get(pref, ["chrome", "edge"])
+    for name in order:
+        for path in browser_paths(name):
+            if Path(path).is_file():
+                return name, path
+    return None, None
+
+
+def open_app_window(url: str, pref: str = "auto") -> None:
+    """用「應用程式視窗」模式開啟 (沒有網址列/分頁);找不到 Chrome/Edge 或選了 default 就用系統預設瀏覽器。"""
+    if sys.platform == "win32" and pref != "default":
+        name, exe = find_browser(pref)
+        if exe:
+            if pref in ("chrome", "edge") and name != pref:
+                print(f"[!] 找不到 {pref},改用 {name}")
+            print(f"以 {name} 應用程式視窗開啟 …")
+            subprocess.Popen([exe, f"--app={url}", "--window-size=760,980"])
+            return
     import webbrowser
+    print("以系統預設瀏覽器開啟 …")
     webbrowser.open(url)
 
 
@@ -503,6 +541,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Gemini TTS 本機圖形介面")
     ap.add_argument("--port", type=int, default=0, help="指定連接埠 (預設 8765,被占用時自動換)")
     ap.add_argument("--no-browser", action="store_true", help="不自動開啟視窗")
+    ap.add_argument("--browser", choices=["auto", "chrome", "edge", "default"], default=None,
+                    help="開啟視窗用的瀏覽器 (預設讀取設置檔 gui_browser,再預設 auto = 優先 Chrome,其次 Edge)")
     ap.add_argument("--no-autoexit", action="store_true", help="關閉視窗後不自動結束程式")
     ap.add_argument("--idle-timeout", type=float, default=25.0, help="視窗關閉多久後自動結束 (秒)")
     ap.add_argument("--api-base", default=os.environ.get("TTS_API_BASE", DEFAULT_API_BASE), help=argparse.SUPPRESS)
@@ -541,8 +581,9 @@ def main() -> None:
                     os._exit(0)
         threading.Thread(target=watchdog, daemon=True).start()
 
+    pref = args.browser or os.environ.get("TTS_BROWSER") or read_json(SETTINGS_FILE, {}).get("gui_browser") or "auto"
     if not args.no_browser:
-        threading.Timer(0.6, open_app_window, args=(url,)).start()
+        threading.Timer(0.6, open_app_window, args=(url, pref)).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
