@@ -1,0 +1,14 @@
+# ===== 機密與本機資料:絕對不要推送 =====
+local/tts_settings.json
+local/tts_voices.json
+local/.gemini_key
+local/output/
+.env
+*.key
+
+# ===== 暫存 / 產生物 =====
+__pycache__/
+*.pyc
+ffbuild/
+site/vendor/
+*.zip

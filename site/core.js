@@ -61,6 +61,10 @@ export const DEFAULTS = {
   keep_wav: false,              // 經 ffmpeg 轉檔時,另外保留原始 WAV
   autoplay: true,               // 生成後自動播放預覽
   retries: 2,
+  batch: false,                 // 批次模式: 文本以單獨一行 --- 分隔,每段各產生一個檔案
+  auto_save: true,              // (本機版) 生成後自動存進輸出資料夾
+  out_dir: 'output',            // (本機版) 輸出資料夾
+  ffmpeg_path: '',              // (本機版) ffmpeg.exe 路徑,留空=自動尋找
 };
 
 // --------------------------------------------------------------------------- //
@@ -420,4 +424,72 @@ export async function runPipeline({ cfg, text, callApi, ffmpeg, onProgress, onLo
     }
   }
   return { outputs, runCfg, perTurn, segments };
+}
+
+// --------------------------------------------------------------------------- //
+// 音色克隆 (Voice replication) — POST/GET/DELETE /v1beta/voices
+// --------------------------------------------------------------------------- //
+export const CLONE = {
+  minSec: 10, maxSec: 30, rate: 24000,
+  statefulTtlDays: 365, keyTtlDays: 7, projectLimit: 200,
+};
+
+export function bytesToB64(u8) {
+  let s = '';
+  const CH = 0x8000;
+  for (let i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+  return btoa(s);
+}
+
+/** 解析 WAV 檔頭,回傳 {channels, rate, bits, seconds};不是 PCM WAV 則丟錯 */
+export function wavInfo(u8) {
+  if (u8.length < 44 || String.fromCharCode(...u8.subarray(0, 4)) !== 'RIFF') throw new Error('不是有效的 WAV 檔');
+  const v = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  let o = 12, fmt = null, dataSize = 0;
+  while (o + 8 <= u8.length) {
+    const id = String.fromCharCode(u8[o], u8[o + 1], u8[o + 2], u8[o + 3]);
+    const size = v.getUint32(o + 4, true);
+    if (id === 'fmt ') fmt = { channels: v.getUint16(o + 10, true), rate: v.getUint32(o + 12, true), bits: v.getUint16(o + 22, true) };
+    if (id === 'data') { dataSize = Math.min(size, u8.length - o - 8); break; }
+    o += 8 + size + (size % 2);
+  }
+  if (!fmt) throw new Error('WAV 缺少 fmt 區塊');
+  return { ...fmt, seconds: dataSize / (fmt.rate * fmt.channels * (fmt.bits / 8)) };
+}
+
+/** 建立克隆聲音的請求本體。store=true → voice_ ID (存在 Google 專案);false → voicekey_ 金鑰 (自行保管) */
+export function buildCreateVoiceBody({ model, name, store, sourceB64, consentB64 }) {
+  const voice = {
+    type: 'replicated',
+    replicated: {
+      source_audio: { mime_type: 'audio/wav', data: sourceB64 },
+      consent_audio: { mime_type: 'audio/wav', data: consentB64 },
+    },
+  };
+  if (model) voice.model = model;
+  if (name) voice.display_name = name;
+  return { store: !!store, voice };
+}
+
+/** 解析建立結果:voice 為之後填進 speech_config 的字串 */
+export function parseCreatedVoice(res, store) {
+  const id = pick(res, 'id');
+  const key = pick(res, 'key', 'voice_key', 'voiceKey');
+  const voice = (!store && key) ? key : (id || key);
+  if (!voice) throw new Error('建立成功但回應中找不到 voice ID/key: ' + JSON.stringify(res).slice(0, 300));
+  return {
+    voice: String(voice), id: String(id || ''), key: String(key || ''),
+    name: String(pick(res, 'display_name', 'displayName') || ''),
+    expires: String(pick(res, 'expire_time', 'expireTime', 'expires_at') || ''),
+  };
+}
+
+/** 試聽用的單句請求 */
+export function previewBody(model, voice, text, style = '') {
+  return {
+    model,
+    input: makeInput([{ speaker: null, voice, style, text }], false),
+    response_format: { type: 'audio' },
+    generation_config: { speech_config: [{ voice }] },
+  };
 }

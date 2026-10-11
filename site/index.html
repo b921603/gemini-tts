@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1a73e8">
 <meta name="color-scheme" content="light dark">
+<meta name="tts-token" content="__TTS_TOKEN__">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
@@ -46,7 +47,7 @@
       <p class="hint">每行一句：<code>名稱: 內容</code>，或 <code>名稱[語氣]: 內容</code> 指定該句語氣。沒有「名稱:」開頭的行會接在上一句後面。</p>
     </div>
     <div class="chips" id="chips" aria-label="快速插入"></div>
-    <textarea id="text" rows="8" placeholder="輸入要生成的文本…"></textarea>
+    <textarea id="text" rows="8" placeholder="輸入要生成的文本…（Ctrl + Enter 直接生成）"></textarea>
     <div class="row between">
       <span id="charCount" class="hint"></span>
       <span class="row">
@@ -66,6 +67,7 @@
         <input id="style" type="text" placeholder="例如 cheerful and friendly、whispering、溫暖沉穩"></label>
     </div>
     <div id="multiVoices" hidden></div>
+    <p class="hint">想用自己的聲音？點上方人聲 → 「我的克隆」即可建立。</p>
     <p class="hint">整段的情緒／語速寫在「語氣」；單一時間點的 <code>&lt;laugh&gt;</code> <code>&lt;sigh&gt;</code> <code>&lt;short pause&gt;</code> 直接寫進文本（標籤用英文）。</p>
   </section>
 
@@ -119,10 +121,23 @@
       <label class="chk"><input type="checkbox" id="loudnorm"> 響度標準化 loudnorm（ffmpeg）</label>
       <label class="chk"><input type="checkbox" id="keep_wav"> 經 ffmpeg 轉檔時，同時保留原始 WAV</label>
       <label class="chk"><input type="checkbox" id="autoplay"> 生成後自動播放預覽</label>
+      <label class="chk"><input type="checkbox" id="batch"> 批次模式：文本以單獨一行 <code>---</code> 分隔，每段各產生一個檔案</label>
       <label class="chk multi-only"><input type="checkbox" id="conversational"> conversational 對話節奏（mode=conversational，被拒時自動退回）</label>
       <label class="chk multi-only"><input type="checkbox" id="force_per_turn"> 強制逐段合成再拼接（超過 2 位或自訂人聲會自動啟用）</label>
+      <div class="local-only" hidden>
+        <h4>本機工具</h4>
+        <label>輸出資料夾（相對路徑以 local 資料夾為基準）<input id="out_dir" type="text" spellcheck="false"></label>
+        <label>ffmpeg.exe 路徑（留空＝自動尋找）<input id="ffmpeg_path" type="text" spellcheck="false" placeholder="例如 C:\\tools\\ffmpeg\\bin\\ffmpeg.exe"></label>
+        <p id="ffStatus" class="hint"></p>
+        <label class="chk"><input type="checkbox" id="auto_save"> 生成後自動儲存到輸出資料夾</label>
+        <div class="row wrap">
+          <button type="button" id="openOut" class="small">開啟輸出資料夾</button>
+          <button type="button" id="installFf" class="small">安裝 ffmpeg（winget）</button>
+          <button type="button" id="quitApp" class="small danger">結束程式</button>
+        </div>
+      </div>
       <div class="row wrap">
-        <button type="button" id="preloadFf" class="small">預先下載 ffmpeg</button>
+        <button type="button" id="preloadFf" class="small web-only">預先下載 ffmpeg</button>
         <button type="button" id="exportCfg" class="small">匯出設置</button>
         <label class="btn small">匯入設置<input type="file" id="importCfg" accept="application/json,.json" hidden></label>
         <button type="button" id="resetCfg" class="small danger">重設為預設</button>
@@ -131,6 +146,12 @@
   </section>
 
   <section id="results" aria-live="polite"></section>
+
+  <details id="historyWrap" class="card local-only" hidden>
+    <summary>最近生成（輸出資料夾）</summary>
+    <ul id="historyList" class="mlist"></ul>
+    <button type="button" id="historyRefresh" class="small">重新整理</button>
+  </details>
 
   <details id="logWrap" class="card">
     <summary>執行紀錄</summary>
@@ -158,7 +179,10 @@
     <button type="button" data-tab="direct" class="active">輸入名稱／ID</button>
     <button type="button" data-tab="online">線上清單</button>
     <button type="button" data-tab="builtin">內建 30 種</button>
+    <button type="button" data-tab="mine">我的克隆</button>
   </div>
+
+  <p id="pvMsg" class="hint" role="status"></p>
 
   <div class="tab" id="tab-direct">
     <label>人聲名稱或 ID
@@ -187,6 +211,53 @@
   <div class="tab" id="tab-builtin" hidden>
     <div id="builtinGrid" class="bgrid"></div>
   </div>
+
+  <div class="tab" id="tab-mine" hidden>
+    <button type="button" id="labOpen" class="primary" style="width:100%">＋ 建立新的克隆聲音</button>
+    <p class="hint">克隆需要：你本人 10–30 秒的參考錄音，加上一段朗讀同意聲明的錄音。</p>
+    <h4>本機金鑰庫 <small>（voicekey_，7 天有效，只存在這台裝置）</small></h4>
+    <ul id="keyList" class="mlist"></ul>
+    <h4>雲端已儲存 <small>（voice_，保留 1 年）</small></h4>
+    <div class="row"><button type="button" id="cloudRefresh" class="small">重新整理</button></div>
+    <p id="cloudMsg" class="hint"></p>
+    <ul id="cloudList" class="mlist"></ul>
+    <button type="button" id="cloudMore" class="small" hidden>載入更多</button>
+    <p id="mineMsg" class="hint"></p>
+  </div>
+</dialog>
+
+<!-- 音色克隆精靈 -->
+<dialog id="labDlg">
+  <div class="dlg-head">
+    <h3>建立克隆聲音</h3>
+    <button type="button" id="labClose" class="small">關閉</button>
+  </div>
+  <p class="hint banner">僅限複製<b>你本人</b>的聲音，或已取得該<b>成年</b>說話者明確同意的聲音。Google 會驗證「同意錄音」與「參考音訊」是否為同一人。</p>
+
+  <h4>① 同意聲明語言</h4>
+  <label>語言<select id="labLang"></select></label>
+  <blockquote id="labStatement" class="statement"></blockquote>
+  <p id="labLangNote" class="hint"></p>
+
+  <h4>② 參考音訊 <small>（10–30 秒，乾淨、自然的說話）</small></h4>
+  <div id="recSrc" class="recbox"></div>
+
+  <h4>③ 同意錄音 <small>（朗讀上方聲明原文）</small></h4>
+  <div id="recConsent" class="recbox"></div>
+  <p class="hint">兩段請用同一支麥克風、同一個安靜環境錄製（避免回音、背景音樂與他人說話聲），驗證較容易通過。</p>
+
+  <h4>④ 名稱與儲存方式</h4>
+  <label>名稱（選填）<input id="labName" type="text" placeholder="例如 我的聲音"></label>
+  <div class="opts">
+    <label class="opt"><input type="radio" name="labStore" value="stored" checked>
+      <span><b>儲存在我的 Google 專案</b>（voice_…）<br><small>保留 1 年；每個專案最多 200 個；可在任何裝置用同一把 API Key 使用。</small></span></label>
+    <label class="opt"><input type="radio" name="labStore" value="key">
+      <span><b>不儲存，由我自己保管金鑰</b>（voicekey_…）<br><small>Google 不留存聲紋；金鑰 7 天有效，只存在這台裝置的瀏覽器。</small></span></label>
+  </div>
+  <label class="chk"><input type="checkbox" id="labConsentChk"> 我確認這是我本人的聲音，或已取得該成年說話者的明確同意。</label>
+  <button type="button" id="labCreate" class="primary" style="width:100%;margin-top:10px" disabled>建立克隆聲音</button>
+  <p id="labMsg" class="hint" role="status"></p>
+  <div id="labResult" class="labres" hidden></div>
 </dialog>
 
 <script type="module" src="app.js"></script>
