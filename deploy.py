@@ -9,6 +9,7 @@
     python deploy.py -m "修正克隆聲音"   自訂提交訊息
     python deploy.py --rollback         回復上一次推送 (用 git revert,不會改寫歷史)
     python deploy.py --status           查看最近一次部署狀態
+    python deploy.py --meta             只同步專案頁資訊 (About 說明 / 網站連結 / Topics,定義在 .github/repo-meta.json)
 選項: --yes 不詢問  --no-wait 不等待部署  --no-open 不開啟瀏覽器
 """
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -36,8 +38,8 @@ except Exception:
     pass
 
 ROOT = Path(__file__).resolve().parent
-MANAGED_DIRS = ["site", ".github", "local"]          # 以更新檔為準同步 (只會刪除「已被追蹤」且更新檔裡沒有的檔案)
-MANAGED_FILES = ["README.md", "SOP.md", "deploy.py", ".gitignore", "啟動圖形介面.bat", "啟動命令列.bat"]
+MANAGED_DIRS = ["site", ".github", "local", "docs"]          # 以更新檔為準同步 (只會刪除「已被追蹤」且更新檔裡沒有的檔案)
+MANAGED_FILES = ["README.md", "README.en.md", "SOP.md", "deploy.py", ".gitignore", "啟動圖形介面.bat", "啟動命令列.bat"]
 # 注意: 「一鍵推送.bat」不在清單內,因為它正在執行時不能被覆蓋
 SECRET_PATTERNS = [
     (re.compile(r"AIza[0-9A-Za-z_\-]{35}"), "Google API Key"),
@@ -46,6 +48,9 @@ SECRET_PATTERNS = [
 FORBIDDEN_NAMES = {"tts_settings.json", "tts_voices.json", ".gemini_key", ".env"}
 MAX_FILE_MB = 50
 STATE_FILE = ROOT / ".git" / "deploy_state.json"
+META_FILE = ROOT / ".github" / "repo-meta.json"        # 專案頁「About」說明 / 網站 / Topics 的定義 (跟著更新檔一起維護)
+GITHUB_API = os.environ.get("TTS_GITHUB_API", "https://api.github.com")
+TOPIC_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,49}$")
 
 
 class DeployError(Exception):
@@ -272,6 +277,103 @@ def wait_actions(owner: str, repo: str, sha: str, timeout: int = 900) -> bool | 
 
 
 # --------------------------------------------------------------------------- #
+# 專案頁資訊 (About 說明、網站連結、Topics) — 這些是儲存庫「設定」,不是檔案,需要透過 API 同步
+# --------------------------------------------------------------------------- #
+def load_meta(owner: str, repo: str) -> dict:
+    try:
+        data = json.loads(META_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise DeployError(f"無法讀取 {META_FILE.name}: {e}")
+    desc = " ".join(str(data.get("description", "")).split())
+    if len(desc) > 350:
+        raise DeployError(f"repo-meta.json 的 description 超過 350 字 (目前 {len(desc)})")
+    home = str(data.get("homepage", "auto")).strip()
+    if home == "auto":
+        home = pages_url(owner, repo)
+    topics: list[str] = []
+    for t in data.get("topics", []):
+        t = str(t).strip().lower()
+        if not TOPIC_RE.fullmatch(t):
+            raise DeployError(f"repo-meta.json 的 topic 不合法: {t!r} (只能是小寫英數與連字號,最長 50 字)")
+        if t not in topics:
+            topics.append(t)
+    if len(topics) > 20:
+        raise DeployError("repo-meta.json 的 topics 最多 20 個")
+    return {"description": desc, "homepage": home, "topics": topics}
+
+
+def get_token() -> str:
+    """優先用環境變數 GH_TOKEN / GITHUB_TOKEN;否則向 Git Credential Manager 取得你推送時用的同一組登入憑證 (不會顯示或儲存)"""
+    for k in ("GH_TOKEN", "GITHUB_TOKEN"):
+        if os.environ.get(k):
+            return os.environ[k].strip()
+    try:
+        r = subprocess.run(["git", "credential", "fill"], cwd=ROOT, input="protocol=https\nhost=github.com\n\n",
+                           capture_output=True, text=True, timeout=25,
+                           env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"})
+        for line in r.stdout.splitlines():
+            if line.startswith("password="):
+                return line[len("password="):].strip()
+    except Exception:
+        pass
+    return ""
+
+
+def gh_api(method: str, path: str, token: str, body: dict | None = None):
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(GITHUB_API + path, data=data, method=method, headers={
+        "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "User-Agent": "gemini-tts-deploy",
+        "X-GitHub-Api-Version": "2022-11-28", **({"Content-Type": "application/json"} if data else {})})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = r.read().decode("utf-8")
+            return r.status, (json.loads(raw) if raw.strip() else {})
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode("utf-8"))
+        except Exception:
+            return e.code, {}
+    except Exception as e:
+        return 0, {"message": f"{type(e).__name__}: {e}"}
+
+
+def sync_repo_meta(owner: str, repo: str) -> bool:
+    """把 .github/repo-meta.json 的內容同步到 GitHub 專案頁。內容相同就不會有任何寫入。失敗只警告,不影響推送。"""
+    if not META_FILE.is_file():
+        print("(沒有 .github/repo-meta.json,略過專案頁資訊同步)")
+        return False
+    meta = load_meta(owner, repo)
+    token = get_token()
+    hint = "請改到 GitHub 專案頁右側 About 區塊的齒輪圖示手動編輯,或設定環境變數 GH_TOKEN(需有 repo 權限)後執行 python deploy.py --meta"
+    if not token:
+        print(f"\n[!] 取不到 GitHub 憑證,略過專案頁資訊同步。{hint}")
+        return False
+    base = f"/repos/{owner}/{repo}"
+    st, cur = gh_api("GET", base, token)
+    if st != 200:
+        print(f"\n[!] 無法讀取專案資訊 (HTTP {st} {cur.get('message', '')})。{hint}")
+        return False
+    done, ok = [], True
+    if (cur.get("description") or "") != meta["description"] or (cur.get("homepage") or "") != meta["homepage"]:
+        st, r = gh_api("PATCH", base, token, {"description": meta["description"], "homepage": meta["homepage"]})
+        if st == 200:
+            done.append("說明 / 網站連結")
+        else:
+            ok = False
+            print(f"\n[!] 更新說明/網站連結失敗 (HTTP {st} {r.get('message', '')})。{hint}")
+    st, cur_t = gh_api("GET", base + "/topics", token)
+    if st == 200 and sorted(cur_t.get("names", [])) != sorted(meta["topics"]):
+        st, r = gh_api("PUT", base + "/topics", token, {"names": meta["topics"]})
+        if st == 200:
+            done.append(f"Topics ({len(meta['topics'])} 個)")
+        else:
+            ok = False
+            print(f"\n[!] 更新 Topics 失敗 (HTTP {st} {r.get('message', '')})。{hint}")
+    print(f"\n專案頁資訊已更新: {'、'.join(done)}" if done else ("\n專案頁資訊已是最新 (說明 / 網站 / Topics)" if ok else ""))
+    return ok
+
+
+# --------------------------------------------------------------------------- #
 # 主流程
 # --------------------------------------------------------------------------- #
 def push_and_report(args, owner_repo) -> None:
@@ -286,6 +388,11 @@ def push_and_report(args, owner_repo) -> None:
     owner, repo = owner_repo
     print(f"Actions : https://github.com/{owner}/{repo}/actions")
     print(f"網站    : {pages_url(owner, repo)}")
+    if not args.no_meta:
+        try:
+            sync_repo_meta(owner, repo)
+        except DeployError as e:
+            print(f"\n[!] 專案頁資訊同步略過: {e}")
     ok = None if args.no_wait else wait_actions(owner, repo, sha)
     if ok and not args.no_open:
         webbrowser.open(pages_url(owner, repo))
@@ -302,6 +409,8 @@ def main() -> int:
     ap.add_argument("--yes", action="store_true", help="全部自動確認")
     ap.add_argument("--no-wait", action="store_true", help="推送後不等待部署結果")
     ap.add_argument("--no-open", action="store_true", help="不自動開啟瀏覽器")
+    ap.add_argument("--meta", action="store_true", help="只同步專案頁資訊 (About 說明 / 網站 / Topics),不推送程式")
+    ap.add_argument("--no-meta", action="store_true", help="這次推送不同步專案頁資訊")
     args = ap.parse_args()
 
     print("=== 一鍵推送 ===")
@@ -319,6 +428,11 @@ def main() -> int:
             print(f"  {r['created_at']}  {r['status']}/{r.get('conclusion')}  {r['head_commit']['message'].splitlines()[0][:50]}  {r['html_url']}")
         print(f"網站: {pages_url(*owner_repo)}")
         return 0
+
+    if args.meta:
+        if not owner_repo:
+            raise DeployError("遠端不是 GitHub,無法同步專案頁資訊")
+        return 0 if sync_repo_meta(*owner_repo) else 1
 
     ensure_identity(args.yes)
 

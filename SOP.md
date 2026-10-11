@@ -81,3 +81,30 @@
 - 兩者共用同一份設置（`local\tts_settings.json`）與克隆金鑰庫（`local\tts_voices.json`）。
 - 沒有 ffmpeg 時，圖形介面「進階選項 → 本機工具」有一鍵安裝按鈕（winget）。
 - API Key：可設定環境變數 `GEMINI_API_KEY`，或在視窗中貼上並勾「記住」（存成 `local\.gemini_key`，不會被推送）。
+
+---
+
+## 六、專案介紹與搜尋曝光（也是一鍵維護）
+
+GitHub 專案頁的內容分兩類，**這套流程都會處理**：
+
+| 內容 | 在哪裡定義 | 怎麼更新 |
+|---|---|---|
+| 說明文件：`README.md`（中文）、`README.en.md`（英文）、`SOP.md`、截圖 `docs/img/*` | 專案檔案本身 | 跟著更新檔，**推送時自動更新** |
+| 專案頁 **About 說明、網站連結、Topics（搜尋標籤）** | `.github/repo-meta.json` | 推送後**自動同步到 GitHub**；內容相同就不動作；只想同步這個：`python deploy.py --meta` |
+
+- `repo-meta.json` 是唯一準則：GitHub 網頁上手動改的 About / Topics，下次推送會被還原成這個檔案的內容。想改介紹，就請 Claude 更新這個檔案（或自己編輯它的 `description` 與 `topics`），再照第二節推送。
+- 同步用的是你推送時已登入的同一組 GitHub 憑證，不需要另外設定。若出現「權限不足」警告，不影響推送，可：①到專案頁右側 About 區塊的齒輪圖示手動貼上；或 ②設定環境變數 `GH_TOKEN`（需 repo 權限）後執行 `python deploy.py --meta`。
+- 限制：`description` 最多 350 字；topics 最多 20 個，只能是小寫英數與連字號。
+
+### 需要你手動做一次的（GitHub 沒有提供自動化）
+
+1. **社群預覽圖**（別人分享連結時顯示的大圖）：專案頁 → **Settings → General → Social preview → Edit → Upload an image**，選 `docs/social-preview.png`。
+2. **授權條款（License）**：沒有授權條款時，別人法律上不能自由使用或散布你的程式。想開放給同好請選一個（例如 MIT 或 Apache-2.0），專案頁 → **Add file → Create new file**，檔名輸入 `LICENSE`，右側會出現 **Choose a license template**。這是你的決定，我不代選。
+3. 確認 **Settings → Pages → Source** 是 **GitHub Actions**（部署用，做過就不用再做）。
+
+### 提升被搜尋到的機會（建議）
+
+- 邀請同好給專案按 ⭐（Star）；GitHub 搜尋與 Topics 頁面會依此排序。
+- 把線上網址放在 README、社群貼文與影片說明中。
+- 想讓更多人看到：把專案貼到相關社群時，附上 `docs/img/` 的截圖。

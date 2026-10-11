@@ -1,1 +1,0 @@
-python tts.py --text-file a.txt
