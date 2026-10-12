@@ -69,7 +69,7 @@ const BIND = [
   ['out_format', 'text'], ['sample_rate', 'int'], ['bitrate', 'text'], ['loudnorm', 'bool'],
   ['speed', 'float'], ['keep_wav', 'bool'], ['autoplay', 'bool'], ['retries', 'int'],
   ['conversational', 'bool'], ['force_per_turn', 'bool'], ['gap_ms', 'int'], ['max_chars', 'int'], ['style', 'text'],
-  ['batch', 'bool'], ['auto_save', 'bool'], ['out_dir', 'text'], ['ffmpeg_path', 'text'], ['gui_browser', 'text'], ['models_show_all', 'bool'],
+  ['batch', 'bool'], ['auto_save', 'bool'], ['out_dir', 'text'], ['ffmpeg_path', 'text'], ['gui_browser', 'text'], ['models_show_all', 'bool'], ['stream', 'bool'], ['preview_mode', 'text'], ['preview_chars', 'int'],
 ];
 
 function readField(k, t) {
@@ -115,8 +115,13 @@ function renderModelSelect() {
   $('#modelCustomWrap').hidden = sel.value !== '__custom';
   const src = { api: '已即時取得你帳戶可用的模型清單', cache: '使用上次取得的清單（連線後自動更新）', fallback: '離線備援清單（輸入 API Key 後會自動取得最新清單）' }[modelState.source];
   const n = modelState.raw.length ? C.normalizeModelList(modelState.raw, false).length : list.length;
-  $('#modelNote').textContent = modelState.loading ? '正在取得模型清單…'
-    : `偵測到 ${n} 個語音（TTS）模型 · ${src}${modelState.error ? ` · ${modelState.error}` : ''}`;
+  sel.disabled = modelState.loading;
+  sel.parentElement.classList.toggle('loading', modelState.loading);
+  $('#modelRefresh').disabled = modelState.loading;
+  const note = $('#modelNote');
+  note.textContent = '';
+  if (modelState.loading) note.append(spin(), ' 正在向 Google 取得你帳戶可用的模型清單…');
+  else note.textContent = `偵測到 ${n} 個語音（TTS）模型 · ${src}${modelState.error ? ` · ${modelState.error}` : ''}`;
 }
 async function refreshModels(force = false) {
   if (!keyAvailable() || modelState.loading) { renderModelSelect(); return; }
@@ -312,7 +317,7 @@ async function explainLocalFailure() {   // fetch 失敗時,判斷是「本機�
   return SERVICE_DOWN_MSG;
 }
 
-async function apiFetch(path, { method = 'GET', body, signal } = {}) {
+async function apiRaw(path, { method = 'GET', body, signal } = {}) {   // 回傳 Response (成功時不讀取本體,串流用)
   const key = getKey();
   if (!keyAvailable()) throw new Error('請先輸入 API Key');
   let res;
@@ -340,19 +345,24 @@ async function apiFetch(path, { method = 'GET', body, signal } = {}) {
     }
     throw new Error('無法連線到 Gemini API（網路中斷，或被瀏覽器的跨來源限制擋下）');
   }
-  const txt = await res.text();
-  if (rt.local && res.status === 403 && /token/.test(txt)) { showServiceDown(STALE_MSG); throw fatal(STALE_MSG); }
-  let json = null;
-  try { json = JSON.parse(txt); } catch { /* 非 JSON */ }
   if (!res.ok) {
+    const txt = await res.text();
+    if (rt.local && res.status === 403 && /token/.test(txt)) { showServiceDown(STALE_MSG); throw fatal(STALE_MSG); }
+    let json = null;
+    try { json = JSON.parse(txt); } catch { /* 非 JSON */ }
     const err = new Error(`HTTP ${res.status}: ${json?.error?.message || txt.slice(0, 300)}`);
     err.status = res.status;
     throw err;
   }
-  if (!txt.trim()) return {};
-  if (!json) throw new Error('伺服器回應不是有效的 JSON');
-  return json;
+  return res;
 }
+async function apiFetch(path, opts = {}) {
+  const res = await apiRaw(path, opts);
+  const txt = await res.text();
+  if (!txt.trim()) return {};
+  try { return JSON.parse(txt); } catch { throw new Error('伺服器回應不是有效的 JSON'); }
+}
+const streamApi = (body, { signal } = {}) => apiRaw('/interactions', { method: 'POST', body, signal });   // SSE 串流 (即時進度)
 
 // --------------------------------------------------------------------------- //
 // 狀態 / 紀錄
@@ -457,6 +467,9 @@ function switchTab(name) {
   if (name === 'online' && !vstate.loaded) loadVoices(true);
   if (name === 'mine') { renderKeyList(); if (!mine.cloudLoaded) loadCloud(true); }
 }
+function skeleton(ul, n) {   // 載入中的骨架列
+  for (let i = 0; i < n; i++) { const li = document.createElement('li'); li.className = 'skel'; li.innerHTML = '<span></span><span></span>'; ul.appendChild(li); }
+}
 function readFilters() {
   const list = (id) => $('#' + id).value.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
   return {
@@ -468,12 +481,14 @@ async function loadVoices(reset) {
   const msg = $('#voiceMsg');
   const ul = $('#voiceList');
   if (reset) { ul.textContent = ''; vstate.token = ''; vstate.filters = readFilters(); }
+  if (keyAvailable() && !vstate.token) skeleton(ul, 5);
   if (!keyAvailable()) { msg.textContent = '請先在頁面最上方輸入 API Key，才能載入線上清單。'; return; }
   msg.textContent = '載入中…';
   $('#voiceMore').hidden = true;
   try {
     const res = await apiFetch('/voices?' + C.buildVoicesQuery(vstate.filters, vstate.token, 20));
     vstate.loaded = true;
+    ul.querySelectorAll('.skel').forEach((e) => e.remove());
     const voices = res.voices || [];
     for (const v of voices) {
       const id = C.pick(v, 'id');
@@ -491,13 +506,14 @@ async function loadVoices(reset) {
       b.append(a, m);
       b.className = 'vsel';
       b.addEventListener('click', () => pickVoice(String(id)));
-      li.append(b, mkBtn('▶', () => previewVoice(String(id)), 'small pv'));
+      li.append(b, mkBtn('▶', (e) => previewVoice(String(id), { lang: String(C.pick(v, 'language_code', 'languageCode')), btn: e.currentTarget }), 'small pv'));
       ul.appendChild(li);
     }
     vstate.token = C.pick(res, 'next_page_token', 'nextPageToken') || '';
     $('#voiceMore').hidden = !vstate.token;
     msg.textContent = ul.children.length ? `已載入 ${ul.children.length} 筆` : '沒有符合條件的人聲（可調整篩選，中文可改用關鍵字）。';
   } catch (e) {
+    ul.querySelectorAll('.skel').forEach((x) => x.remove());
     msg.textContent = `載入失敗：${e.message}`;
   }
 }
@@ -515,8 +531,87 @@ const fmtSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : (n / 1
 function setBusy(b) {
   $('#genBtn').disabled = b;
   $('#cancelBtn').hidden = !b;
-  $('#prog').hidden = !b;
-  if (b) $('#prog').removeAttribute('value');
+}
+
+// --------------------------------------------------------------------------- //
+// 進度面板:四個階段 + 實際已收到的音訊秒數 + 依文字量的預估 (官方沒有百分比進度,預估僅供預期)
+// --------------------------------------------------------------------------- //
+const STAGE_LABELS = ['已送出', 'Google 處理中', '接收音訊', '處理／存檔'];
+const prog = { on: false, timer: 0, tLast: 0, t0: 0, idx: 0, mode: '', pre: '', post: '', i: 1, n: 1, perTurn: false, seconds: 0, est: 0, sec0: 0, tFirst: 0, tSeg: 0, estTotal: 0, tag: '' };
+const fmtDur = (ms) => { const t = Math.floor(ms / 1000); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
+function spin(cls = '') { const e = document.createElement('span'); e.className = `spinner ${cls}`; return e; }
+
+function progBegin() {
+  Object.assign(prog, { on: true, t0: performance.now(), idx: 0, mode: '', pre: '', post: '', i: 1, n: 1, perTurn: false, seconds: 0, est: 0, sec0: 0, tFirst: 0, tSeg: performance.now(), estTotal: 0, tag: '' });
+  const panel = $('#progPanel');
+  const ol = $('#progStages');
+  if (!ol.children.length) STAGE_LABELS.forEach((t) => { const li = document.createElement('li'); li.textContent = t; ol.appendChild(li); });
+  panel.hidden = false;
+  clearInterval(prog.timer);
+  prog.timer = setInterval(() => progRender(), 200);
+  progRender();
+}
+function progEnd(ok) {
+  prog.on = false;
+  clearInterval(prog.timer);
+  if (ok) { progRender(true); setTimeout(() => { if (!prog.on) $('#progPanel').hidden = true; }, 1800); }
+  else $('#progPanel').hidden = true;
+}
+function progEvent(p, tag = '') {
+  prog.tag = tag;
+  const now = performance.now();
+  switch (p.stage) {
+    case 'ffmpeg-load': prog.pre = rt.local ? '檢查 ffmpeg…' : '載入 ffmpeg…（首次需下載約 31 MB，之後會快取）'; break;
+    case 'tts-start': prog.pre = ''; prog.perTurn = p.perTurn; prog.n = p.n; prog.estTotal = p.estSec; break;
+    case 'tts': prog.i = p.i; prog.n = p.n; prog.seconds = 0; prog.est = 0; prog.tFirst = 0; prog.idx = 0; break;
+    case 'sent': prog.mode = p.mode; prog.tSeg = now; prog.seconds = 0; prog.tFirst = 0; prog.idx = p.mode === 'unary' ? 1 : 0; if (!prog.perTurn) prog.est = prog.estTotal; break;
+    case 'accepted': prog.idx = 1; break;
+    case 'receiving': prog.idx = 2; prog.seconds = p.seconds; prog.est = p.est; if (!prog.tFirst) { prog.tFirst = now; prog.sec0 = p.seconds; } prog.tLast = now; break;
+    case 'received': prog.idx = prog.perTurn ? 2 : 3; prog.seconds = prog.est; break;
+    case 'convert': prog.idx = 3; prog.post = 'ffmpeg 轉檔中…'; break;
+    case 'post': prog.idx = 3; prog.post = p.text || '整理檔案…'; break;
+    default: break;
+  }
+  progRender();
+}
+function progRender(final = false) {
+  const panel = $('#progPanel');
+  if (panel.hidden) return;
+  const now = performance.now();
+  const idx = final ? 4 : prog.idx;
+  panel.querySelectorAll('.stages li').forEach((li, k) => { li.className = k < idx ? 'done' : k === idx ? 'active' : ''; });
+  const within = prog.est > 0 ? Math.min(0.95, prog.seconds / prog.est) : 0;
+  let frac = null;                                         // null = 不確定 (顯示流動動畫)
+  if (final) frac = 1;
+  else if (prog.perTurn) frac = Math.min(0.97, ((prog.i - 1) + (prog.idx === 2 ? within : 0)) / prog.n);
+  else if (prog.idx === 2 && prog.est > 0) frac = within * 0.92;
+  else if (prog.idx >= 3) frac = 0.96;
+  const bar = $('#progFill').parentElement;
+  bar.classList.toggle('indeterminate', frac === null);
+  $('#progFill').style.width = frac === null ? '' : `${Math.round(frac * 100)}%`;
+
+  const seg = prog.perTurn ? `第 ${prog.i}/${prog.n} 段 · ` : '';
+  const wait = `${Math.max(0, Math.round((now - prog.tSeg) / 1000))} 秒`;
+  const estTxt = prog.estTotal > 0 && !prog.perTurn ? `，預估音訊約 ${Math.round(prog.estTotal)} 秒` : '';
+  let main;
+  if (final) main = '完成';
+  else if (prog.pre) main = prog.pre;
+  else if (prog.idx >= 3) main = prog.post || '處理中…';
+  else if (prog.idx === 2) {
+    const parts = [`已生成 ${prog.seconds.toFixed(1)} 秒音訊`];
+    if (prog.est > 0) parts.push(`預估約 ${Math.max(Math.round(prog.est), Math.ceil(prog.seconds))} 秒`);
+    if (prog.tFirst && prog.tLast > prog.tFirst && prog.est > prog.seconds) {   // 以「最後一個區塊的時間」為基準,倒數才會平順不跳動
+      const rate = (prog.seconds - prog.sec0) / ((prog.tLast - prog.tFirst) / 1000);
+      const left = rate > 0.05 ? (prog.est - prog.seconds) / rate - (now - prog.tLast) / 1000 : 0;
+      if (prog.seconds >= 1.5 && left > 0.5 && left < 3600) parts.push(`約剩 ${Math.round(left)} 秒（預估）`);
+    }
+    main = seg + parts.join(' · ');
+  } else if (prog.idx === 1) {
+    main = seg + (prog.mode === 'stream' ? `Google 已接受請求，正在準備生成…（已等待 ${wait}${estTxt}）`
+      : `已送出，等待 Google 回傳完整音訊…此模式不提供即時進度（已等待 ${wait}${estTxt}）`);
+  } else main = seg + '正在送出請求…';
+  $('#progMain').textContent = prog.tag + main;
+  $('#progTime').textContent = `⏱ ${fmtDur(now - prog.t0)}`;
 }
 
 function validate(text) {
@@ -546,7 +641,8 @@ async function generate() {
   ctl = new AbortController();
   setBusy(true);
   $('#log').textContent = '';
-  setStatus('準備中…');
+  setStatus('');
+  progBegin();
   try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { wakeLock = null; }
   const t0 = performance.now();
   const stem = safeName($('#filename').value.trim() || stamp());
@@ -563,14 +659,14 @@ async function generate() {
         callApi: (body) => apiFetch('/interactions', { method: 'POST', body, signal: ctl.signal }),
         ffmpeg: { ensure: ensureFfmpeg, run: ffRun },
         onLog: (m, l) => log(tag + m, l),
-        onProgress: (p) => {
-          const prog = $('#prog');
-          if (p.stage === 'ffmpeg-load') setStatus(`${tag}載入 ffmpeg…`);
-          else if (p.stage === 'tts-start') { setStatus(`${tag}${p.perTurn ? `逐段合成中（共 ${p.n} 段）…` : '生成中，請稍候…'}`); if (p.perTurn) { prog.max = p.n; prog.value = 0; } else prog.removeAttribute('value'); }
-          else if (p.stage === 'tts') { setStatus(`${tag}合成第 ${p.i}/${p.n} 段（${p.who}，${p.chars} 字）…`); prog.max = p.n; prog.value = p.i - 1; }
-          else if (p.stage === 'convert') { prog.removeAttribute('value'); setStatus(`${tag}ffmpeg 轉檔中…`); }
-        },
+        streamApi: cfg.stream !== false ? streamApi : null,
+        onProgress: (p) => progEvent(p, tag),
       });
+      progEvent({ stage: 'post', text: rt.local && res.runCfg.auto_save !== false ? '儲存到輸出資料夾…' : '整理檔案…' }, tag);
+      if (res.usage && Object.keys(res.usage).length) {
+        const u = Object.entries(res.usage).map(([k, v]) => `${k}=${v}`).join('、');
+        log(`${tag}Google 回報的用量：${u}`);
+      }
       addResults(res.outputs, chunks.length > 1 ? `${stem}_${String(i + 1).padStart(3, '0')}` : stem, res.runCfg, i === 0);
       done++;
       lastRun = res.runCfg;
@@ -578,6 +674,7 @@ async function generate() {
     }
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
     const many = chunks.length > 1 ? `，共 ${chunks.length} 個檔案` : '';
+    progEnd(true);
     if (lastRun.out_format !== cfg.out_format) setStatus(`完成（${secs} 秒${many}）。注意：ffmpeg 無法使用，已改輸出 WAV。`, 'warn');
     else setStatus(`完成（${secs} 秒${many}）`, 'ok');
   } catch (e) {
@@ -586,6 +683,7 @@ async function generate() {
     else { setStatus(`失敗${part}：${e.message}`, 'error'); log(`失敗：${e.stack || e.message}`, 'error'); }
   } finally {
     setBusy(false);
+    if (prog.on) progEnd(false);
     try { await wakeLock?.release(); } catch { /* ignore */ }
     wakeLock = null;
     ctl = null;
@@ -728,7 +826,6 @@ async function refreshHello() {
 // 音色克隆 (Voice replication)
 // --------------------------------------------------------------------------- //
 const LIB_KEY = 'tts.voicekeys.v1';
-const PREVIEW_TEXT = '你好，這是我的克隆聲音測試。Hello, this is a voice test.';
 const mine = { cloudToken: '', cloudLoaded: false };
 const cloneModel = () => { const m = resolveModelNow(); return C.isTtsModelId(m) ? m : (C.pickAutoModel(currentModels()) || C.FALLBACK_TTS_MODELS[0]); };
 const labDlg = $('#labDlg');
@@ -753,24 +850,155 @@ function mkBtn(text, fn, cls = '') {
   return b;
 }
 
-function previewSample() {   // 單人模式且已輸入文本時,用文本開頭試聽 (含目前語氣),更貼近實際效果
-  if (cfg.mode === 'single') {
-    const t = $('#text').value.replace(/<[^>]+>/g, '').trim().slice(0, 80);
-    if (t) return { text: t, style: cfg.style };
+// --------------------------------------------------------------------------- //
+// 試聽:依序嘗試 ① 快取 → ② 官方範例音訊 (僅「聲音設計」建立的聲音有) → ③ 合成「一句短範例」。
+// 結果會快取:同一聲音 (相同模型/語氣/內容) 再次試聽不會消耗額度。預設只合成一句短範例,不使用整段文本。
+// --------------------------------------------------------------------------- //
+const SAMPLE_TEXTS = {
+  zh: '你好，很高興認識你。', en: 'Hello, nice to meet you.', ja: 'こんにちは、はじめまして。', ko: '안녕하세요, 만나서 반갑습니다.',
+  fr: 'Bonjour, ravi de vous rencontrer.', de: 'Hallo, schön, Sie kennenzulernen.', es: 'Hola, encantado de conocerte.',
+  pt: 'Olá, prazer em conhecê-lo.', it: 'Ciao, piacere di conoscerti.', ru: 'Здравствуйте, рад знакомству.',
+  hi: 'नमस्ते, आपसे मिलकर खुशी हुई।', ar: 'مرحباً، تشرفت بمعرفتك.', th: 'สวัสดี ยินดีที่ได้รู้จัก',
+  vi: 'Xin chào, rất vui được gặp bạn.', id: 'Halo, senang bertemu dengan Anda.', tr: 'Merhaba, tanıştığıma memnun oldum.',
+};
+const sampleFor = (lang = '') => SAMPLE_TEXTS[(lang || navigator.language || 'en').toLowerCase().slice(0, 2)] || SAMPLE_TEXTS.en;
+function previewSample(lang = '') {
+  if (cfg.preview_mode === 'mytext') {
+    let t = $('#text').value.replace(/<[^>]+>/g, ' ').replace(/^\s*[^\s:：]{1,20}(\[[^\]]*\])?[:：]\s*/gm, '').replace(/\s+/g, ' ').trim();
+    t = [...t].slice(0, Math.max(5, Number(cfg.preview_chars) || 30)).join('');
+    if (t) return { text: t, style: cfg.mode === 'single' ? cfg.style : '', kind: 'mytext' };
   }
-  return { text: PREVIEW_TEXT, style: '' };
+  return { text: sampleFor(lang), style: '', kind: 'sample' };
 }
-async function previewVoice(voice, msgEl = $('#pvMsg')) {
-  msgEl.textContent = '試聽生成中…';
+
+const pvCache = (() => {   // IndexedDB:最多保留最近 60 筆試聽 (每筆約 100–200 KB)
+  let dbp = null;
+  const open = () => (dbp ||= new Promise((res, rej) => {
+    const r = indexedDB.open('tts-cache', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('pv');
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  }));
+  const tx = async (mode, fn) => {
+    const db = await open();
+    return new Promise((res, rej) => {
+      const t = db.transaction('pv', mode);
+      const rq = fn(t.objectStore('pv'));
+      t.oncomplete = () => res(rq?.result);
+      t.onerror = () => rej(t.error);
+    });
+  };
+  return {
+    get: (k) => tx('readonly', (st) => st.get(k)).then((v) => (v ? v.bytes : null)).catch(() => null),
+    async put(k, bytes) {
+      try {
+        await tx('readwrite', (st) => st.put({ bytes, at: Date.now() }, k));
+        const all = await tx('readonly', (st) => st.getAll());
+        const keys = await tx('readonly', (st) => st.getAllKeys());
+        if (all.length > 60) {
+          const order = all.map((v, i) => ({ k: keys[i], at: v.at })).sort((x, y) => x.at - y.at).slice(0, all.length - 60);
+          for (const o of order) await tx('readwrite', (st) => st.delete(o.k));
+        }
+      } catch { /* 快取失敗不影響使用 */ }
+    },
+    clear: () => tx('readwrite', (st) => st.clear()).catch(() => {}),
+  };
+})();
+const noSample = () => { try { return new Set(JSON.parse(safeGet(sessionStorage, 'tts.nosample') || '[]')); } catch { return new Set(); } };
+const markNoSample = (v) => { const set = noSample(); set.add(v); safeSet(sessionStorage, 'tts.nosample', JSON.stringify([...set])); };
+
+const pvState = { ctl: null, timer: 0, url: '' };
+function getPvBar(host) {   // 試聽狀態列:固定在對話框最上方 (捲動時也看得到),按下 ▶ 的同一刻就顯示
+  let bar = host.querySelector(':scope > .pvbar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.className = 'pvbar';
+    bar.hidden = true;
+    bar.innerHTML = '<div class="pvrow"><span class="spinner"></span><span class="pvtext"></span><button type="button" class="small pvcancel">取消</button></div><div class="pbar indeterminate"><i></i></div><audio controls hidden></audio>';
+    host.querySelector(':scope > .dlg-head').after(bar);
+    bar.querySelector('.pvcancel').addEventListener('click', () => pvState.ctl?.abort());
+  }
+  return bar;
+}
+async function previewVoice(voice, { lang = '', btn = null } = {}) {
+  pvState.ctl?.abort();
+  const host = labDlg.open ? labDlg : dlg;
+  const bar = getPvBar(host);
+  const $b = (q) => bar.querySelector(q);
+  const textEl = $b('.pvtext'), spinEl = $b('.spinner'), cancel = $b('.pvcancel'), audio = $b('audio'), pb = $b('.pbar'), fill = $b('.pbar i');
+  const ctl = new AbortController();
+  pvState.ctl = ctl;
+  const current = () => pvState.ctl === ctl;
+  const label = `試聽 ${showVoice(voice)}`;
+  const t0 = performance.now();
+  let stageText = '準備試聽…';
+  const render = () => { if (current()) textEl.textContent = `${label} · ${stageText} · ⏱ ${((performance.now() - t0) / 1000).toFixed(1)} 秒`; };
+  const setStage = (t) => { stageText = t; render(); };
+
+  document.querySelectorAll('button.busy').forEach((b) => { b.classList.remove('busy'); b.disabled = false; });
+  if (btn) { btn.classList.add('busy'); btn.disabled = true; }
+  audio.pause(); audio.hidden = true;
+  bar.hidden = false; bar.classList.remove('err');
+  spinEl.hidden = false; cancel.hidden = false; pb.hidden = false; pb.classList.add('indeterminate'); fill.style.width = '';
+  clearInterval(pvState.timer);
+  pvState.timer = setInterval(render, 150);
+  render();
+
+  const finish = () => { if (current()) { clearInterval(pvState.timer); spinEl.hidden = true; cancel.hidden = true; pb.hidden = true; } };
   try {
-    const smp = previewSample();
-    const json = await apiFetch('/interactions', { method: 'POST', body: C.previewBody(cloneModel(), voice, smp.text, smp.style) });
-    const url = URL.createObjectURL(new Blob([C.extractAudio(json)], { type: 'audio/wav' }));
-    const a = new Audio(url);
-    a.addEventListener('ended', () => URL.revokeObjectURL(url));
-    await a.play();
-    msgEl.textContent = '正在播放試聽…';
-  } catch (e) { msgEl.textContent = `試聽失敗：${e.message}`; }
+    const model = cloneModel();
+    const smp = previewSample(lang);
+    const key = [model, voice, smp.style, smp.text].join('\u0001');
+    setStage('檢查快取…');
+    let wav = await pvCache.get(key);
+    let source = wav ? '快取（不消耗額度）' : '';
+    if (!wav && /^voice_/.test(voice) && !noSample().has(voice)) {   // 聲音設計建立的聲音附有官方 sample_audio (免合成)
+      setStage('查詢官方範例音訊…');
+      try {
+        const v = await apiFetch('/voices/' + encodeURIComponent(voice), { signal: ctl.signal });
+        const sa = C.pick(v, 'sample_audio', 'sampleAudio');
+        const d = sa ? C.pick(sa, 'data') : '';
+        if (d) { wav = C.b64ToBytes(d); source = '官方範例音訊（免費）'; await pvCache.put(key, wav); } else markNoSample(voice);
+      } catch (e) { if (e?.name === 'AbortError') throw e; markNoSample(voice); }
+    }
+    if (!wav) {
+      setStage('① 送出請求…');
+      const r = await C.synthesizeOnce({
+        model, voice, style: smp.style, text: smp.text, signal: ctl.signal,
+        callApi: (b) => apiFetch('/interactions', { method: 'POST', body: b, signal: ctl.signal }),
+        streamApi: cfg.stream !== false ? streamApi : null,
+        onProgress: (p) => {
+          if (!current()) return;
+          if (p.stage === 'sent') setStage(p.mode === 'unary' ? '② 已送出，等待 Google 回傳…' : '① 已送出');
+          else if (p.stage === 'accepted') setStage('② Google 已接受，生成中…');
+          else if (p.stage === 'receiving') {
+            setStage(`③ 已收到 ${p.seconds.toFixed(1)} 秒音訊`);
+            pb.classList.remove('indeterminate');
+            fill.style.width = `${Math.round(Math.min(0.95, p.seconds / Math.max(p.est, p.seconds + 0.1)) * 100)}%`;
+          }
+        },
+      });
+      wav = r.wav;
+      source = smp.kind === 'mytext' ? '用你的文本開頭合成' : '合成一句短範例';
+      await pvCache.put(key, wav);
+    }
+    finish();
+    if (!current()) return;
+    if (pvState.url) URL.revokeObjectURL(pvState.url);
+    pvState.url = URL.createObjectURL(new Blob([wav], { type: 'audio/wav' }));
+    audio.src = pvState.url; audio.hidden = false;
+    textEl.textContent = `${label} · 播放中 · 來源：${source}`;
+    await audio.play().catch(() => { textEl.textContent = `${label} · 已就緒，請按播放 · 來源：${source}`; });
+  } catch (e) {
+    finish();
+    if (current()) {
+      if (e?.name === 'AbortError') textEl.textContent = `${label} · 已取消`;
+      else { bar.classList.add('err'); textEl.textContent = `${label} · 失敗：${e.message}`; }
+    }
+  } finally {
+    if (btn) { btn.classList.remove('busy'); btn.disabled = false; }
+    if (pvState.ctl === ctl) pvState.ctl = null;
+  }
 }
 
 function voiceRow({ title, meta, metaClass = '', voice, expired = false, onDelete }) {
@@ -779,7 +1007,7 @@ function voiceRow({ title, meta, metaClass = '', voice, expired = false, onDelet
   const m = document.createElement('div'); m.className = `m-meta ${metaClass}`; m.textContent = meta;
   const row = document.createElement('div'); row.className = 'row';
   const use = mkBtn('選用', () => pickVoice(voice), 'small primary');
-  const pv = mkBtn('試聽', () => previewVoice(voice, $('#mineMsg')), 'small');
+  const pv = mkBtn('試聽', (e) => previewVoice(voice, { btn: e.currentTarget }), 'small');
   use.disabled = expired; pv.disabled = expired;
   row.append(use, pv, mkBtn('刪除', onDelete, 'small danger'));
   li.append(n, m, row);
@@ -816,7 +1044,8 @@ async function loadCloud(reset) {
   const ul = $('#cloudList'), msg = $('#cloudMsg');
   if (reset) { ul.textContent = ''; mine.cloudToken = ''; }
   if (!keyAvailable()) { msg.textContent = '請先在頁面最上方輸入 API Key。'; return; }
-  msg.textContent = '載入中…';
+  msg.textContent = '';
+  msg.append(spin(), ' 載入中…');
   $('#cloudMore').hidden = true;
   try {
     const res = await apiFetch('/voices?' + C.buildVoicesQuery({ type: ['replicated'] }, mine.cloudToken, 50));
@@ -1021,12 +1250,11 @@ async function labCreate() {
     const m = document.createElement('div'); m.className = 'meta';
     m.textContent = `${name || v.name || '（未命名）'} · ${store ? `${v.voice}（保留約 1 年）` : `${shortKey(v.voice)}（金鑰 7 天有效，已存入本機金鑰庫）`}`;
     const row = document.createElement('div'); row.className = 'row';
-    const pmsg = document.createElement('p'); pmsg.className = 'hint';
     row.append(
       mkBtn('使用這個聲音', () => { labDlg.close(); lab.onDone?.(v.voice); }, 'small primary'),
-      mkBtn('試聽', () => previewVoice(v.voice, pmsg), 'small'),
+      mkBtn('試聽', (e) => previewVoice(v.voice, { btn: e.currentTarget }), 'small'),
     );
-    box.append(t, m, row, pmsg);
+    box.append(t, m, row);
     box.hidden = false;
     lab.src.clear(); lab.consent.clear(); $('#labConsentChk').checked = false;
   } catch (e) {
@@ -1077,6 +1305,7 @@ async function init() {
     renderModelSelect();
   });
   $('#modelRefresh').addEventListener('click', () => refreshModels(true));
+  $('#clearPreviewCache').addEventListener('click', async () => { await pvCache.clear(); setStatus('已清除試聽快取', 'ok'); });
   $('#models_show_all').addEventListener('change', () => { onFormChange(); renderModelSelect(); });
   $('#modelCustom').addEventListener('input', onFormChange);
   $('#speakers').addEventListener('change', () => {
@@ -1144,7 +1373,7 @@ async function init() {
     sm.textContent = d;
     b.append(sp, sm);
     b.addEventListener('click', () => pickVoice(n));
-    cell.append(b, mkBtn('▶', () => previewVoice(n), 'small pv'));
+    cell.append(b, mkBtn('▶', (e) => previewVoice(n, { btn: e.currentTarget }), 'small pv'));
     grid.appendChild(cell);
   }
 
@@ -1190,13 +1419,13 @@ async function init() {
     $('#installFf').addEventListener('click', async () => {
       if (!confirm('使用 winget 安裝 ffmpeg（Gyan.FFmpeg）？約需 1–2 分鐘。')) return;
       setStatus('安裝 ffmpeg 中（約 1–2 分鐘，請勿關閉視窗）…');
-      $('#prog').hidden = false; $('#prog').removeAttribute('value');
+      progBegin(); prog.pre = '安裝 ffmpeg 中…（約 1–2 分鐘，請勿關閉視窗）';
       try {
         const j = await ljson('install-ffmpeg', 'POST', {});
         await refreshHello();
         setStatus(j.found ? 'ffmpeg 安裝完成' : `安裝未完成：${j.output}`, j.found ? 'ok' : 'error');
       } catch (e) { setStatus(`安裝失敗：${e.message}`, 'error'); }
-      $('#prog').hidden = true;
+      progEnd(false);
     });
     $('#quitApp').addEventListener('click', async () => {
       if (!confirm('結束本機服務並關閉程式？')) return;

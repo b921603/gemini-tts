@@ -39,8 +39,9 @@ except Exception:
 
 ROOT = Path(__file__).resolve().parent
 MANAGED_DIRS = ["site", ".github", "local", "docs"]          # 以更新檔為準同步 (只會刪除「已被追蹤」且更新檔裡沒有的檔案)
-MANAGED_FILES = ["README.md", "README.en.md", "SOP.md", "deploy.py", ".gitignore", "啟動圖形介面.bat", "啟動命令列.bat"]
+MANAGED_FILES = ["README.md", "README.en.md", "deploy.py", ".gitignore", "啟動圖形介面.bat", "啟動命令列.bat"]
 # 注意: 「一鍵推送.bat」不在清單內,因為它正在執行時不能被覆蓋
+UNTRACK_FILES = ["SOP.md"]      # 維護者私人文件:不放進公開倉庫。若曾被推送過,會自動從倉庫移除 (本機檔案保留)
 SECRET_PATTERNS = [
     (re.compile(r"AIza[0-9A-Za-z_\-]{35}"), "Google API Key"),
     (re.compile(r"voicekey_[A-Za-z0-9_\-]{20,}"), "克隆聲音金鑰 (voicekey_…)"),
@@ -93,7 +94,7 @@ def ensure_environment() -> None:
         raise DeployError("找不到 Git。請先安裝: winget install --id Git.Git -e  (裝完請重新開啟這個視窗)")
     if git("rev-parse", "--is-inside-work-tree", check=False) != "true":
         raise DeployError("這個資料夾還不是 Git 儲存庫。請先執行一次性設定: "
-                          "git clone https://github.com/<帳號>/<儲存庫>.git  然後把這些檔案放進該資料夾 (見 SOP.md)")
+                          "git clone https://github.com/<帳號>/<儲存庫>.git  然後把這些檔案放進該資料夾 (見你的 SOP 文件)")
     if not git("remote", "get-url", "origin", check=False):
         raise DeployError("找不到遠端 origin。請用 git clone 取得的資料夾,或執行: git remote add origin <網址>")
 
@@ -190,6 +191,16 @@ def sync_from_zip(zpath: Path) -> int:
 # --------------------------------------------------------------------------- #
 # 安全檢查
 # --------------------------------------------------------------------------- #
+def untrack_private_files() -> list[str]:
+    """把「不該在倉庫裡」的私人檔案從追蹤中移除 (git rm --cached,本機檔案保留;.gitignore 會防止再被加入)"""
+    removed = []
+    for f in UNTRACK_FILES:
+        if git("ls-files", "--error-unmatch", "--", f, check=False):
+            git("rm", "--cached", "-q", "--", f)
+            removed.append(f)
+    return removed
+
+
 def scan_staged() -> list[str]:
     problems = []
     files = [f for f in git("diff", "--cached", "--name-only").splitlines() if f]
@@ -380,7 +391,7 @@ def push_and_report(args, owner_repo) -> None:
     branch = git("rev-parse", "--abbrev-ref", "HEAD")
     print("\n推送到 GitHub …  (第一次可能會跳出瀏覽器要求登入 GitHub,請依指示授權)")
     if git_live("push", "-u", "origin", branch) != 0:
-        raise DeployError("推送失敗。常見原因: 尚未登入 GitHub / 沒有這個儲存庫的寫入權限 / 網路問題 (見 SOP.md 的疑難排解)")
+        raise DeployError("推送失敗。常見原因: 尚未登入 GitHub / 沒有這個儲存庫的寫入權限 / 網路問題 (見你的 SOP 文件的疑難排解)")
     sha = git("rev-parse", "HEAD")
     print(f"已推送 {sha[:7]}")
     if not owner_repo:
@@ -441,7 +452,7 @@ def main() -> int:
         print("同步遠端最新內容 …")
         if git_live("pull", "--rebase", "--autostash", "origin", branch) != 0:
             git("rebase", "--abort", check=False)
-            raise DeployError("同步遠端失敗 (可能有衝突)。請把上面的訊息貼給 Claude,或參考 SOP.md「衝突」一節。")
+            raise DeployError("同步遠端失敗 (可能有衝突)。請把上面的訊息貼給 Claude,或參考你的 SOP 文件「疑難排解」一節。")
 
     if args.rollback:
         last = git("log", "-1", "--pretty=%h %s")
@@ -473,6 +484,8 @@ def main() -> int:
     else:
         print("沒有找到更新檔,只處理資料夾裡手動修改的內容。")
 
+    for f in untrack_private_files():
+        print(f"已從儲存庫移除 {f}（只移除追蹤，你電腦上的檔案保留；之後不會再被推送）")
     git("add", "-A")
     problems = scan_staged()
     if problems:

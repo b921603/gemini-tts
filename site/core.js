@@ -111,6 +111,9 @@ export const DEFAULTS = {
   keep_wav: false,              // 經 ffmpeg 轉檔時,另外保留原始 WAV
   autoplay: true,               // 生成後自動播放預覽
   retries: 2,
+  stream: true,                 // 使用串流取得即時進度 (官方支援 stream:true;失敗會自動退回一般模式)
+  preview_mode: 'sample',       // 試聽內容: sample = 一句短範例 (省額度,預設) / mytext = 我的文本開頭
+  preview_chars: 30,            // 試聽用我的文本開頭時的字數上限
   batch: false,                 // 批次模式: 文本以單獨一行 --- 分隔,每段各產生一個檔案
   auto_save: true,              // (本機版) 生成後自動存進輸出資料夾
   out_dir: 'output',            // (本機版) 輸出資料夾
@@ -352,14 +355,153 @@ export async function withRetry(fn, retries, { onRetry, signal } = {}) {
   }
 }
 
-// callApi(body) -> parsed JSON (由呼叫端注入 fetch 邏輯,便於測試)
-async function callTTS(callApi, model, input, speechConfig, responseFormat, retries, hooks) {
-  const body = { model, input, response_format: responseFormat, generation_config: { speech_config: speechConfig } };
-  return withRetry(async () => extractAudio(await callApi(body)), retries, hooks);
+// --------------------------------------------------------------------------- //
+// 進度:串流 (SSE) 與估算
+// 官方文件: stream:true 時,音訊以 step.delta 事件 (delta.type==='audio', delta.data 為 base64 的 24 kHz 單聲道 16-bit PCM) 分塊傳回。
+// 官方沒有「百分比」進度,所以顯示「已收到幾秒音訊」+ 依文字量估算的總長度 (估算值,僅供預期)。
+// --------------------------------------------------------------------------- //
+/** 依文字量粗估語音長度 (秒):CJK ≈ 4.2 字/秒、其他 ≈ 14 字元/秒;<short pause>/<long pause> 另加 */
+export function estimateSpeechSeconds(text) {
+  const raw = String(text || '');
+  const pauses = (raw.match(/<short pause>/gi) || []).length * 0.5 + (raw.match(/<long pause>/gi) || []).length * 1.2;
+  const t = raw.replace(/<[^>]*>/g, ' ');
+  const cjk = (t.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/g) || []).length;
+  const rest = t.replace(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\s]/g, '').length;
+  return Math.max(1, cjk / 4.2 + rest / 14 + pauses);
 }
 
-async function generateSingleRequest({ cfg, segments, multi, needFf, callApi, hooks, log }) {
+/** 讀取 SSE (text/event-stream):body 是 ReadableStream;每個 data: JSON 事件呼叫 onEvent(obj) */
+export async function readSSE(body, onEvent) {
+  const reader = body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  const handle = (raw) => {
+    const data = raw.split(/\r?\n/).filter((l) => l.startsWith('data:')).map((l) => l.slice(5).replace(/^ /, '')).join('\n');
+    if (!data.trim() || data.trim() === '[DONE]') return;
+    let obj;
+    try { obj = JSON.parse(data); } catch { return; }
+    onEvent(obj);
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let m;
+    while ((m = /\r?\n\r?\n/.exec(buf))) {
+      handle(buf.slice(0, m.index));
+      buf = buf.slice(m.index + m[0].length);
+    }
+  }
+  buf += dec.decode();
+  if (buf.trim()) handle(buf);
+}
+
+const deltaAudio = (ev) => {
+  const d = ev?.delta ?? ev?.data?.delta;
+  return d && d.type === 'audio' && typeof d.data === 'string' ? d.data : null;
+};
+function deepAudio(o, out = [], depth = 0) {   // 事件格式萬一不同時的寬鬆後備:找出所有 type:'audio' 的 base64 區塊
+  if (!o || typeof o !== 'object' || depth > 6) return out;
+  if (o.type === 'audio' && typeof o.data === 'string' && o.data.length > 64) out.push(o.data);
+  for (const v of Object.values(o)) if (v && typeof v === 'object') deepAudio(v, out, depth + 1);
+  return out;
+}
+const findUsage = (ev) => ev?.usage || ev?.interaction?.usage || ev?.usage_metadata || ev?.usageMetadata || null;
+
+/** 合併多段的用量 (數字欄位相加) */
+export function mergeUsage(list) {
+  const out = {};
+  for (const u of list || []) for (const [k, v] of Object.entries(u || {})) if (typeof v === 'number') out[k] = (out[k] || 0) + v;
+  return out;
+}
+
+async function streamPcm(streamApi, body, { signal, onOpen, onChunk }) {
+  const res = await streamApi(body, { signal });
+  onOpen?.();
+  const deltas = [];
+  let finals = [];
+  let usage = null;
+  let total = 0, nEvents = 0;
+  const types = new Set();
+  await readSSE(res.body, (ev) => {
+    nEvents++;
+    if (ev?.event_type) types.add(ev.event_type);
+    if (ev?.error) throw Object.assign(new Error(ev.error.message || JSON.stringify(ev.error)), { status: ev.error.code });
+    const b64 = deltaAudio(ev);
+    if (b64) {
+      const u8 = b64ToBytes(b64);
+      deltas.push(u8);
+      total += u8.length;
+      onChunk?.(total);
+    } else if (/complete|done|stop/i.test(ev?.event_type || '')) finals = finals.concat(deepAudio(ev));
+    usage = findUsage(ev) || usage;
+  });
+  const parts = deltas.length ? deltas : finals.map(b64ToBytes);
+  if (!parts.length) {
+    throw Object.assign(new Error(`串流沒有收到音訊（${nEvents} 個事件：${[...types].join(', ') || '無類型'}）`), { emptyStream: true, noRetry: true });   // 重試只會重複生成 (重複計費),直接退回一般模式
+  }
+  const data = concatBytes(parts);
+  const isWav = String.fromCharCode(data[0], data[1], data[2], data[3]) === 'RIFF';
+  return isWav ? { wav: data, usage } : { pcm: data, usage };
+}
+
+// --------------------------------------------------------------------------- //
+// API 呼叫
+// --------------------------------------------------------------------------- //
+const bodyFor = (model, input, speechConfig, rf) => ({ model, input, response_format: rf, generation_config: { speech_config: speechConfig } });
+
+/**
+ * 合成一次。out: 'pcm' → 24 kHz 單聲道原始 PCM;'wav' → 含檔頭 WAV;'native' → 依 rf 原樣 (mulaw/alaw/自訂取樣率,不走串流)。
+ * ctx.streamApi 可用且 cfg.stream !== false 時走串流 (取得即時進度);還沒收到任何音訊就失敗時,自動退回一般請求。
+ */
+async function synth(ctx, { input, speechConfig, rf, out, segInfo = {}, estSec = 0, retries }) {
+  const { cfg, callApi, streamApi, hooks, onProgress } = ctx;
+  const tag = (o) => ({ ...segInfo, ...o });
+  if (streamApi && cfg.stream !== false && !ctx.streamBroken && out !== 'native') {
+    let got = false;
+    try {
+      return await withRetry(async () => {
+        try {
+          onProgress?.(tag({ stage: 'sent', mode: 'stream' }));
+          const body = { ...bodyFor(cfg.model, input, speechConfig, { type: 'audio', mime_type: 'audio/l16', sample_rate: PCM_RATE }), stream: true };
+          const r = await streamPcm(streamApi, body, {
+            signal: hooks.signal,
+            onOpen: () => onProgress?.(tag({ stage: 'accepted', mode: 'stream' })),
+            onChunk: (total) => { got = true; onProgress?.(tag({ stage: 'receiving', mode: 'stream', seconds: total / (PCM_RATE * 2), est: estSec })); },
+          });
+          if (r.usage) ctx.usage.push(r.usage);
+          if (r.wav) return out === 'wav' ? r.wav : wavToPcm(r.wav);
+          return out === 'wav' ? pcmToWav(r.pcm, PCM_RATE) : r.pcm;
+        } catch (e) {
+          if (got && e && typeof e === 'object') e.noRetry = true;     // 已收到部分音訊就不要整段重來 (避免重複計費)
+          throw e;
+        }
+      }, retries, hooks);
+    } catch (e) {
+      const streamUnsupported = e?.emptyStream || (e?.status === 400 && /stream/i.test(e.message || ''));
+      if (!streamUnsupported || got) throw e;
+      ctx.streamBroken = true;
+      ctx.log?.(`串流模式無法使用 (${e.message})，改用一般模式。`, 'warn');
+    }
+  }
+  onProgress?.(tag({ stage: 'sent', mode: 'unary' }));
+  const data = await withRetry(async () => extractAudio(await callApi(bodyFor(cfg.model, input, speechConfig, rf))), retries, hooks);
+  onProgress?.(tag({ stage: 'received', mode: 'unary' }));
+  return data;
+}
+
+/** 試聽等「單句合成」:回傳含檔頭的 WAV */
+export async function synthesizeOnce({ model, voice, style = '', text, callApi, streamApi, onProgress, signal, stream = true }) {
+  const ctx = { cfg: { model, stream }, callApi, streamApi, hooks: { signal }, onProgress, usage: [] };
+  const input = makeInput([{ speaker: null, voice, style, text }], false);
+  const wav = await synth(ctx, { input, speechConfig: [{ voice }], rf: { type: 'audio' }, out: 'wav', estSec: estimateSpeechSeconds(text), retries: 0 });
+  return { wav, usage: mergeUsage(ctx.usage) };
+}
+
+async function generateSingleRequest(ctx, { segments, multi, needFf }) {
+  const { cfg, callApi, hooks, log } = ctx;
   const fmt = cfg.out_format;
+  const wantWav = needFf || (fmt === 'wav' && !cfg.sample_rate);
   const rf = { type: 'audio' };
   if (!needFf) {
     if (fmt !== 'wav' || cfg.sample_rate) rf.mime_type = NATIVE_FORMATS[fmt].mime;
@@ -367,12 +509,14 @@ async function generateSingleRequest({ cfg, segments, multi, needFf, callApi, ho
   }
   const input = makeInput(segments, multi);
   const kind = needFf ? 'wav' : fmt;
+  const estSec = estimateSpeechSeconds(segments.map((s) => s.text).join(' '));
+  const run = (speechConfig, retries) => synth(ctx, { input, speechConfig, rf, out: wantWav ? 'wav' : 'native', estSec, retries });
   let sc;
   if (multi) {
     sc = { speakers: cfg.speakers.map((n) => ({ speaker: n, voice: cfg.speaker_voices[n] })) };
     if (cfg.conversational) {
       try {
-        return { data: await callTTS(callApi, cfg.model, input, { ...sc, mode: 'conversational' }, rf, 0, hooks), kind };
+        return { data: await run({ ...sc, mode: 'conversational' }, 0), kind };
       } catch (e) {
         if (e?.name === 'AbortError') throw e;
         log?.(`帶 mode=conversational 失敗 (${e.message}),改用一般多人模式重試。`, 'warn');
@@ -381,18 +525,20 @@ async function generateSingleRequest({ cfg, segments, multi, needFf, callApi, ho
   } else {
     sc = [{ voice: segments[0].voice }];
   }
-  return { data: await callTTS(callApi, cfg.model, input, sc, rf, cfg.retries, hooks), kind };
+  return { data: await run(sc, cfg.retries), kind };
 }
 
-async function generatePerTurn({ cfg, segments, callApi, hooks, onProgress }) {
+async function generatePerTurn(ctx, { segments }) {
+  const { cfg, onProgress } = ctx;
   const chunks = [];
   const gap = new Uint8Array(2 * Math.floor(PCM_RATE * cfg.gap_ms / 1000));
   const rf = { type: 'audio', mime_type: 'audio/l16', sample_rate: PCM_RATE };
   for (let i = 0; i < segments.length; i++) {
     const s = segments[i];
-    onProgress?.({ stage: 'tts', i: i + 1, n: segments.length, who: s.speaker || '旁白', chars: [...s.text].length });
+    const info = { i: i + 1, n: segments.length, who: s.speaker || '旁白', chars: [...s.text].length };
+    onProgress?.({ stage: 'tts', ...info });
     const input = makeInput([{ ...s, speaker: null }], false);
-    const data = await callTTS(callApi, cfg.model, input, [{ voice: s.voice }], rf, cfg.retries, hooks);
+    const data = await synth(ctx, { input, speechConfig: [{ voice: s.voice }], rf, out: 'pcm', segInfo: info, estSec: estimateSpeechSeconds(s.text), retries: cfg.retries });
     if (i > 0 && gap.length) chunks.push(gap);
     chunks.push(data);
   }
@@ -420,11 +566,12 @@ export function planGeneration(cfg, segments) {
  *  cfg       設定
  *  text      文本
  *  callApi   async (body) => JSON
+ *  streamApi async (body, {signal}) => Response(SSE)   (選用;有提供且 cfg.stream !== false 時顯示即時進度)
  *  ffmpeg    { ensure: async () => bool, run: async (args, inputBytes, outName) => Uint8Array }
  *  onProgress / onLog / signal
- * 回傳 { outputs:[{label, bytes, ext, mime, playable, fmt}], runCfg, perTurn, segments }
+ * 回傳 { outputs:[{label, bytes, ext, mime, playable, fmt}], runCfg, perTurn, segments, usage }
  */
-export async function runPipeline({ cfg, text, callApi, ffmpeg, onProgress, onLog, signal }) {
+export async function runPipeline({ cfg, text, callApi, streamApi, ffmpeg, onProgress, onLog, signal }) {
   const log = (m, level = 'info') => onLog?.(m, level);
   const segments = buildSegments(cfg, text);
   const { multi, perTurn, notes } = planGeneration(cfg, segments);
@@ -446,10 +593,9 @@ export async function runPipeline({ cfg, text, callApi, ffmpeg, onProgress, onLo
     signal,
     onRetry: (e, wait, n, total) => log(`失敗 (${e.message});${wait} 秒後重試 (${n}/${total})`, 'warn'),
   };
-  onProgress?.({ stage: 'tts-start', perTurn, n: segments.length });
-  const gen = perTurn
-    ? await generatePerTurn({ cfg: runCfg, segments, callApi, hooks, onProgress })
-    : await generateSingleRequest({ cfg: runCfg, segments, multi, needFf, callApi, hooks, log });
+  const ctx = { cfg: runCfg, callApi, streamApi, hooks, onProgress, log, usage: [], streamBroken: false };
+  onProgress?.({ stage: 'tts-start', perTurn, n: segments.length, estSec: estimateSpeechSeconds(segments.map((s) => s.text).join(' ')) });
+  const gen = perTurn ? await generatePerTurn(ctx, { segments }) : await generateSingleRequest(ctx, { segments, multi, needFf });
 
   const fmt = runCfg.out_format;
   const outputs = [];
@@ -474,7 +620,7 @@ export async function runPipeline({ cfg, text, callApi, ffmpeg, onProgress, onLo
       if (!outputs.length) outputs.push({ label: '原始 WAV (轉檔失敗)', bytes: gen.data, fmt: 'wav', ...outputMeta('wav') });
     }
   }
-  return { outputs, runCfg, perTurn, segments };
+  return { outputs, runCfg, perTurn, segments, usage: mergeUsage(ctx.usage) };
 }
 
 // --------------------------------------------------------------------------- //

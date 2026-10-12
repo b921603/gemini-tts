@@ -6,6 +6,9 @@ local/output/
 .env
 *.key
 
+# ===== 維護者私人文件 (不放進公開倉庫) =====
+SOP.md
+
 # ===== 暫存 / 產生物 =====
 __pycache__/
 *.pyc

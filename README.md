@@ -6,7 +6,7 @@
 
 網頁版（Android PWA）＋ Windows 本機圖形介面，使用 Google **Gemini 文字轉語音（TTS）** API。**自動偵測並使用你帳戶可用的最新語音模型，不綁定特定版本。**
 
-[**▶ 線上使用**](https://b921603.github.io/gemini-tts/) · [English](README.en.md) · [更新與推送 SOP](SOP.md)
+[**▶ 線上使用**](https://b921603.github.io/gemini-tts/) · [English](README.en.md)
 
 <img src="docs/img/01-main.png" width="240" alt="主畫面"> <img src="docs/img/02-voice-picker.png" width="240" alt="人聲選擇與試聽"> <img src="docs/img/03-voice-clone.png" width="240" alt="音色克隆精靈">
 
@@ -15,6 +15,8 @@
 ## 特色
 
 - **自動使用最新模型**：向 Google 取得你帳戶可用的模型清單，預設自動挑選最新世代的語音（TTS）模型；新一代模型上線後不需要更新程式。也能手動指定或輸入任何模型 ID。
+- **看得見的進度**：生成時顯示四個階段（已送出 → Google 處理中 → 接收音訊 → 處理／存檔），並用官方串流顯示「已生成 N 秒音訊」與預估剩餘時間（官方不提供百分比，預估僅供參考）；不支援串流時自動退回一般模式。
+- **省額度試聽**：▶ 試聽只合成**一句短範例**（約 2–3 秒），結果快取在你的裝置，同一聲音再聽不會再消耗額度；聲音設計建立的聲音直接使用官方範例音訊。
 - **兩種用法，同一套介面**：網頁版可安裝到 Android 主畫面；本機版是 Windows 應用程式視窗，使用原生 ffmpeg、自動存檔。
 - **人聲**：直接輸入名稱／ID、線上清單（可篩選語言／性別／音高）、內建 30 種；每個都能 ▶ **試聽**。
 - **單人旁白／多人對話**：`名稱[語氣]: 內容`，超過 2 位講者或使用自訂人聲時自動逐段合成。
@@ -54,7 +56,7 @@ site/        網頁版（部署到 GitHub Pages）
 local/       本機版：tts_gui.py（圖形介面）、tts.py（命令列）
 docs/        README 截圖與社群預覽圖
 .github/     自動部署流程、專案頁資訊定義（repo-meta.json）
-deploy.py    一鍵推送工具（見 SOP.md）
+deploy.py    維護者用的一鍵推送工具
 ```
 
 ## 模型自動選擇

@@ -123,6 +123,15 @@
       <label class="chk"><input type="checkbox" id="loudnorm"> 響度標準化 loudnorm（ffmpeg）</label>
       <label class="chk"><input type="checkbox" id="keep_wav"> 經 ffmpeg 轉檔時，同時保留原始 WAV</label>
       <label class="chk"><input type="checkbox" id="models_show_all"> 模型清單顯示全部模型（預設只列名稱含 tts 的語音模型）</label>
+      <label class="chk"><input type="checkbox" id="stream"> 顯示即時進度（使用官方串流；失敗時會自動改用一般模式）</label>
+      <div class="grid">
+        <label>試聽內容
+          <select id="preview_mode">
+            <option value="sample">一句短範例（省額度，預設）</option>
+            <option value="mytext">我的文本開頭</option>
+          </select></label>
+        <label>「我的文本開頭」字數上限<input id="preview_chars" type="number" min="5" max="200" step="5" inputmode="numeric"></label>
+      </div>
       <label class="chk"><input type="checkbox" id="autoplay"> 生成後自動播放預覽</label>
       <label class="chk"><input type="checkbox" id="batch"> 批次模式：文本以單獨一行 <code>---</code> 分隔，每段各產生一個檔案</label>
       <label class="chk multi-only"><input type="checkbox" id="conversational"> conversational 對話節奏（mode=conversational，被拒時自動退回）</label>
@@ -148,6 +157,7 @@
       </div>
       <div class="row wrap">
         <button type="button" id="modelRefresh" class="small">重新整理模型清單</button>
+        <button type="button" id="clearPreviewCache" class="small">清除試聽快取</button>
         <button type="button" id="preloadFf" class="small web-only">預先下載 ffmpeg</button>
         <button type="button" id="exportCfg" class="small">匯出設置</button>
         <label class="btn small">匯入設置<input type="file" id="importCfg" accept="application/json,.json" hidden></label>
@@ -172,7 +182,11 @@
 </main>
 
 <div class="bar">
-  <progress id="prog" hidden></progress>
+  <div id="progPanel" class="progpanel" hidden aria-live="polite">
+    <ol id="progStages" class="stages"></ol>
+    <div class="pbar indeterminate"><i id="progFill"></i></div>
+    <div class="ptext"><span id="progMain"></span><span id="progTime"></span></div>
+  </div>
   <p id="status" role="status"></p>
   <div class="row">
     <button id="genBtn" type="button" class="primary">生成音頻</button>
@@ -193,7 +207,8 @@
     <button type="button" data-tab="mine">我的克隆</button>
   </div>
 
-  <p id="pvMsg" class="hint" role="status"></p>
+  <p class="hint pvhint">▶ 試聽只合成<b>一句短範例</b>（約 2–3 秒音訊），結果會快取，同一聲音再聽不會再消耗額度。想多聽聲音也可到
+    <a href="https://aistudio.google.com/generate-speech" target="_blank" rel="noopener">Google AI Studio 語音頁 ↗</a>（不經過本工具的 API Key）。</p>
 
   <div class="tab" id="tab-direct">
     <label>人聲名稱或 ID

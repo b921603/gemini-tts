@@ -141,3 +141,41 @@ audio.inline { width: 100%; margin-top: 6px; }
 
 .svc-banner { position: sticky; top: 0; z-index: 20; background: var(--danger); color: #fff; padding: 10px 14px;
               text-align: center; font-weight: 600; font-size: .92rem; }
+
+/* ---- 載入/進度視覺 ---- */
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent);
+           border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; flex: none; }
+.spinner[hidden] { display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes flow { 0% { transform: translateX(-100%); } 100% { transform: translateX(350%); } }
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+label.loading select { background-image: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 25%, transparent), transparent);
+                       background-size: 200% 100%; animation: shimmer 1.2s linear infinite; color: var(--muted); }
+button.busy { color: transparent !important; position: relative; }
+button.busy::after { content: ""; position: absolute; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent);
+                     border-radius: 50%; animation: spin .8s linear infinite; }
+.skel { display: block !important; height: 52px; border-radius: 10px; margin-bottom: 6px;
+        background: linear-gradient(90deg, var(--bg) 25%, color-mix(in srgb, var(--line) 70%, transparent) 50%, var(--bg) 75%);
+        background-size: 200% 100%; animation: shimmer 1.3s linear infinite; border: 1px solid var(--line); }
+.skel span { display: none; }
+
+.pbar { position: relative; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.pbar > i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 4px; transition: width .25s ease; }
+.pbar.indeterminate > i { position: absolute; width: 30%; animation: flow 1.3s ease-in-out infinite; transition: none; }
+.progpanel { max-width: 696px; margin: 0 auto 6px; }
+.stages { display: flex; gap: 4px; list-style: none; margin: 0 0 6px; padding: 0; font-size: .72rem; color: var(--muted); }
+.stages li { flex: 1; text-align: center; padding: 3px 2px; border-radius: 6px; background: var(--bg); border: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stages li.active { color: var(--fg); border-color: var(--accent); font-weight: 600; background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.stages li.active::before { content: "● "; color: var(--accent); animation: pulse 1s ease-in-out infinite; }
+.stages li.done { color: var(--ok); } .stages li.done::before { content: "✓ "; }
+@keyframes pulse { 50% { opacity: .3; } }
+.ptext { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; font-size: .84rem; }
+.ptext #progMain { flex: 1; min-width: 0; } .ptext #progTime { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+
+.pvbar { position: sticky; top: 0; z-index: 4; background: var(--card); margin: 0 -14px 8px; padding: 8px 14px 10px; border-bottom: 1px solid var(--line); }
+.pvbar .pvrow { display: flex; align-items: center; gap: 6px; font-size: .88rem; }
+.pvbar .pvtext { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.pvbar .pbar { margin-top: 6px; }
+.pvbar audio { width: 100%; margin-top: 6px; height: 36px; }
+.pvbar.err .pvtext { color: var(--danger); }
+.pvhint { margin: 4px 0 8px; }

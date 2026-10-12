@@ -470,6 +470,38 @@ class Handler(BaseHTTPRequestHandler):
         if body:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(STATE["api_base"] + rest, data=body, method=method, headers=headers)
+        is_stream = False
+        if method == "POST" and path_only == "/interactions" and body:
+            try:
+                is_stream = bool(json.loads(body).get("stream"))
+            except Exception:
+                pass
+        if is_stream:   # 串流 (SSE):邊收邊轉給瀏覽器,瀏覽器才能即時顯示進度
+            try:
+                r = urllib.request.urlopen(req, timeout=600)
+            except urllib.error.HTTPError as e:
+                return self._send(e.code, e.read(), e.headers.get("Content-Type", "application/json"))
+            except Exception as e:
+                return self._err(502, f"無法連線到 Gemini API: {type(e).__name__}")
+            with r:
+                self.close_connection = True
+                self.send_response(r.status)
+                self.send_header("Content-Type", r.headers.get("Content-Type", "text/event-stream"))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Accel-Buffering", "no")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                try:
+                    while True:
+                        chunk = r.read1(8192)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+            return
         try:
             with urllib.request.urlopen(req, timeout=600) as r:
                 data, code, ctype = r.read(), r.status, r.headers.get("Content-Type", "application/json")
