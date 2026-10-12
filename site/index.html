@@ -14,9 +14,11 @@
 </head>
 <body>
 <header class="top">
-  <h1>Gemini 3.8 TTS</h1>
+  <h1>Gemini TTS</h1>
   <button id="installBtn" type="button" hidden>安裝到主畫面</button>
 </header>
+
+<div id="svcBanner" class="svc-banner" role="alert" hidden></div>
 
 <main>
   <p id="restoreNote" class="hint banner" hidden></p>
@@ -77,8 +79,7 @@
     <div class="grid">
       <label>模型
         <select id="modelSel">
-          <option value="gemini-3.8-flash-tts">3.8 Flash TTS（高品質）</option>
-          <option value="gemini-3.8-flash-lite-tts">3.8 Flash-Lite TTS（快速省成本）</option>
+          <option value="auto">自動（推薦最新語音模型）</option>
           <option value="__custom">自訂模型 ID…</option>
         </select></label>
       <label id="modelCustomWrap" hidden>自訂模型 ID
@@ -102,6 +103,7 @@
       <label>檔名（不含副檔名，留空自動命名）
         <input id="filename" type="text" placeholder="tts_20261009_120000"></label>
     </div>
+    <p id="modelNote" class="hint"></p>
     <p id="ffNote" class="hint" hidden></p>
 
     <details id="advanced">
@@ -120,6 +122,7 @@
       </div>
       <label class="chk"><input type="checkbox" id="loudnorm"> 響度標準化 loudnorm（ffmpeg）</label>
       <label class="chk"><input type="checkbox" id="keep_wav"> 經 ffmpeg 轉檔時，同時保留原始 WAV</label>
+      <label class="chk"><input type="checkbox" id="models_show_all"> 模型清單顯示全部模型（預設只列名稱含 tts 的語音模型）</label>
       <label class="chk"><input type="checkbox" id="autoplay"> 生成後自動播放預覽</label>
       <label class="chk"><input type="checkbox" id="batch"> 批次模式：文本以單獨一行 <code>---</code> 分隔，每段各產生一個檔案</label>
       <label class="chk multi-only"><input type="checkbox" id="conversational"> conversational 對話節奏（mode=conversational，被拒時自動退回）</label>
@@ -144,6 +147,7 @@
         </div>
       </div>
       <div class="row wrap">
+        <button type="button" id="modelRefresh" class="small">重新整理模型清單</button>
         <button type="button" id="preloadFf" class="small web-only">預先下載 ffmpeg</button>
         <button type="button" id="exportCfg" class="small">匯出設置</button>
         <label class="btn small">匯入設置<input type="file" id="importCfg" accept="application/json,.json" hidden></label>
@@ -185,7 +189,7 @@
   <div class="tabs" role="tablist">
     <button type="button" data-tab="direct" class="active">輸入名稱／ID</button>
     <button type="button" data-tab="online">線上清單</button>
-    <button type="button" data-tab="builtin">內建 30 種</button>
+    <button type="button" data-tab="builtin">常用內建</button>
     <button type="button" data-tab="mine">我的克隆</button>
   </div>
 

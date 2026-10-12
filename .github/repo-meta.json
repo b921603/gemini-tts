@@ -1,9 +1,21 @@
 {
-  "description": "Gemini 3.8 TTS 語音生成工具：網頁版（Android PWA）＋Windows 本機圖形介面。單人/多人對話、音色克隆、MP3/FLAC/Opus 輸出。Gemini text-to-speech web app & local GUI with voice cloning.",
+  "description": "Gemini TTS 語音生成工具：網頁版（Android PWA）＋Windows 本機圖形介面。自動使用最新語音模型、單人/多人對話、音色克隆、MP3/FLAC/Opus 輸出。Gemini text-to-speech web app & local GUI with voice cloning.",
   "homepage": "auto",
   "topics": [
-    "gemini", "gemini-api", "google-gemini", "text-to-speech", "tts", "speech-synthesis",
-    "voice-cloning", "pwa", "ffmpeg-wasm", "github-pages", "javascript", "python",
-    "windows", "android", "traditional-chinese"
+    "gemini",
+    "gemini-api",
+    "google-gemini",
+    "text-to-speech",
+    "tts",
+    "speech-synthesis",
+    "voice-cloning",
+    "pwa",
+    "ffmpeg-wasm",
+    "github-pages",
+    "javascript",
+    "python",
+    "windows",
+    "android",
+    "traditional-chinese"
   ]
 }

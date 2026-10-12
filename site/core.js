@@ -1,12 +1,61 @@
-// core.js — Gemini 3.8 TTS 核心邏輯 (無 DOM 依賴,可在瀏覽器與 Node 測試)
+// core.js — Gemini TTS 核心邏輯 (無 DOM 依賴,可在瀏覽器與 Node 測試)
 // 由 tts.py 一對一移植:文本解析、分段、請求組裝、WAV 處理、ffmpeg 參數、完整生成流程。
 
 export const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
-export const MODELS = {
-  '1': 'gemini-3.8-flash-tts',
-  '2': 'gemini-3.8-flash-lite-tts',
-};
+// --------------------------------------------------------------------------- //
+// 模型探索:不綁定任何特定世代。平常以 API (GET /v1beta/models) 即時回傳的清單為準,
+// 自動挑選「最新世代」的語音模型;下一代模型出現時不需要改程式。
+// --------------------------------------------------------------------------- //
+/** 只在「從未成功取得過線上清單」(離線/第一次) 時才使用的備援,上線後即被取代 */
+export const FALLBACK_TTS_MODELS = ['gemini-3.8-flash-tts', 'gemini-3.8-flash-lite-tts'];
+
+export const stripModelPrefix = (n) => String(n || '').trim().replace(/^models\//, '');
+export const isTtsModelId = (id) => /tts/i.test(id || '');
+
+/** 從模型 ID 解析 {version:[3,8], tier, preview}。例: gemini-3.8-flash-lite-tts-preview */
+export function parseModelId(id) {
+  const m = /(?:^|-)(\d+(?:\.\d+)*)(?=-|$)/.exec(id || '');
+  const version = m ? m[1].split('.').map(Number) : [0];
+  const tier = /lite/i.test(id) ? 'lite' : /pro/i.test(id) ? 'pro' : /flash/i.test(id) ? 'flash' : 'other';
+  return { version, tier, preview: /preview|exp/i.test(id || '') };
+}
+const TIER_ORDER = { flash: 0, pro: 1, lite: 2, other: 3 };
+function cmpVersion(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (b[i] || 0) - (a[i] || 0);      // 新版本在前
+    if (d) return d;
+  }
+  return 0;
+}
+/** 最佳在前:語音模型優先 → 版本新 → 正式版優先於 preview → flash(均衡) > pro > lite → ID 字母序 */
+export function compareModels(x, y) {
+  const a = parseModelId(x.id), b = parseModelId(y.id);
+  return (Number(isTtsModelId(y.id)) - Number(isTtsModelId(x.id)))
+    || cmpVersion(a.version, b.version)
+    || (Number(a.preview) - Number(b.preview))
+    || (TIER_ORDER[a.tier] - TIER_ORDER[b.tier])
+    || x.id.localeCompare(y.id);
+}
+/** apiModels: API 回傳的 models[] (name / displayName ...)。showAll=false 時只留名稱含 tts 的模型。 */
+export function normalizeModelList(apiModels, showAll = false) {
+  const seen = new Set();
+  const out = [];
+  for (const m of apiModels || []) {
+    const id = stripModelPrefix(m.id || m.name);
+    if (!id || seen.has(id) || (!showAll && !isTtsModelId(id))) continue;
+    seen.add(id);
+    out.push({ id, displayName: m.displayName || m.display_name || '' });
+  }
+  return out.sort(compareModels);
+}
+export const pickAutoModel = (items) => (items && items.length ? items.find((x) => isTtsModelId(x.id))?.id || items[0].id : '');
+/** 'auto' → 目前最新的語音模型;其他值原樣使用 (去掉 models/ 前綴) */
+export function resolveModel(model, items) {
+  const m = stripModelPrefix(model);
+  if (!m || m === 'auto') return pickAutoModel(items) || FALLBACK_TTS_MODELS[0];
+  return m;
+}
 
 export const BUILTIN_VOICES = [
   ['Zephyr', 'Bright'], ['Puck', 'Upbeat'], ['Charon', 'Informative'],
@@ -42,7 +91,8 @@ const BLOB_MIME = {
 export const PLAYABLE = new Set(['wav', 'mp3', 'flac', 'ogg', 'opus', 'm4a']);
 
 export const DEFAULTS = {
-  model: MODELS['1'],
+  model: 'auto',                // 'auto' = 自動選用目前最新的語音(TTS)模型;也可填具體模型 ID
+  models_show_all: false,       // 模型清單是否包含名稱不含 tts 的模型 (萬一新世代命名改變時的後路)
   mode: 'single',               // single / multi
   voice: 'Kore',
   style: '',
@@ -294,7 +344,7 @@ export async function withRetry(fn, retries, { onRetry, signal } = {}) {
     } catch (e) {
       const st = e?.status;
       const clientErr = st >= 400 && st < 500 && st !== 408 && st !== 429;   // 金鑰錯誤/參數錯誤重試也沒用
-      if (e?.name === 'AbortError' || signal?.aborted || clientErr || attempt >= retries) throw e;
+      if (e?.name === 'AbortError' || signal?.aborted || clientErr || e?.noRetry || attempt >= retries) throw e;
       const wait = 2 ** attempt;
       onRetry?.(e, wait, attempt + 1, retries);
       await new Promise((r) => setTimeout(r, wait * 1000));

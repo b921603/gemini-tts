@@ -1,10 +1,10 @@
 <div align="center">
 
-# Gemini 3.8 TTS
+# Gemini TTS
 
 **語音生成工具：手機與電腦都能用 · 音色克隆 · 多人對話 · MP3 / FLAC / Opus 輸出**
 
-網頁版（Android PWA）＋ Windows 本機圖形介面，使用 Google **Gemini 3.8 Flash TTS** API。
+網頁版（Android PWA）＋ Windows 本機圖形介面，使用 Google **Gemini 文字轉語音（TTS）** API。**自動偵測並使用你帳戶可用的最新語音模型，不綁定特定版本。**
 
 [**▶ 線上使用**](https://b921603.github.io/gemini-tts/) · [English](README.en.md) · [更新與推送 SOP](SOP.md)
 
@@ -14,6 +14,7 @@
 
 ## 特色
 
+- **自動使用最新模型**：向 Google 取得你帳戶可用的模型清單，預設自動挑選最新世代的語音（TTS）模型；新一代模型上線後不需要更新程式。也能手動指定或輸入任何模型 ID。
 - **兩種用法，同一套介面**：網頁版可安裝到 Android 主畫面；本機版是 Windows 應用程式視窗，使用原生 ffmpeg、自動存檔。
 - **人聲**：直接輸入名稱／ID、線上清單（可篩選語言／性別／音高）、內建 30 種；每個都能 ▶ **試聽**。
 - **單人旁白／多人對話**：`名稱[語氣]: 內容`，超過 2 位講者或使用自訂人聲時自動逐段合成。
@@ -56,6 +57,12 @@ docs/        README 截圖與社群預覽圖
 deploy.py    一鍵推送工具（見 SOP.md）
 ```
 
+## 模型自動選擇
+
+輸入 API Key 後，工具會呼叫 Google 的模型清單 API（`models.list`），列出名稱含 `tts` 的語音模型，並依「世代越新越優先 → 正式版優先於 preview → flash（均衡）優先於 pro、lite」自動推薦。
+預設選項「自動」會在每次生成時使用目前最新的語音模型；你也可以固定選某個版本，或輸入任何模型 ID。
+無法連線時會使用上次取得的清單；若新世代的命名不含 `tts`，可在「進階選項」勾選「顯示全部模型」。
+
 ## 常見問題
 
 **這是什麼？** 一個使用 Gemini 文字轉語音（text-to-speech, TTS）API 的免費工具，可在手機瀏覽器或 Windows 上生成語音檔，支援音色克隆與多人對話。
@@ -73,5 +80,5 @@ ffmpeg 參數採白名單；檔案存取限制在輸出資料夾內。
 
 ---
 
-<sub>關鍵字：Gemini TTS、Gemini 3.8 Flash TTS、文字轉語音、語音合成、音色克隆、聲音克隆、多人對話、Android PWA、ffmpeg.wasm、GitHub Pages、繁體中文。
+<sub>關鍵字：Gemini TTS、Gemini Flash TTS、文字轉語音、語音合成、音色克隆、聲音克隆、多人對話、Android PWA、ffmpeg.wasm、GitHub Pages、繁體中文。
 本專案為非官方社群工具，與 Google 無隸屬關係。</sub>

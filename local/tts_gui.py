@@ -51,7 +51,7 @@ MAX_BODY = 200 * 1024 * 1024
 VERSION = "1.0"
 
 TOKEN = secrets.token_urlsafe(24)
-STATE = {"port": 0, "last_ping": 0.0, "pinged": False, "api_base": DEFAULT_API_BASE, "site": None}
+STATE = {"port": 0, "last_ping": 0.0, "pinged": False, "bye_at": 0.0, "active": 0, "api_base": DEFAULT_API_BASE, "site": None}
 LOCK = threading.Lock()
 
 
@@ -247,6 +247,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -268,11 +270,14 @@ class Handler(BaseHTTPRequestHandler):
         tok = self.headers.get("X-TTS-Token") or parse_qs(urlparse(self.path).query).get("t", [""])[0]
         return bool(tok) and secrets.compare_digest(tok, TOKEN)
 
-    def _body(self) -> bytes:
+    def _read_raw(self) -> bytes:
         n = int(self.headers.get("Content-Length") or 0)
         if n > MAX_BODY:
             raise ValueError("內容過大")
         return self.rfile.read(n) if n else b""
+
+    def _body(self) -> bytes:
+        return self._raw
 
     # ---- 路由 ----
     def do_GET(self):
@@ -291,9 +296,19 @@ class Handler(BaseHTTPRequestHandler):
         self._err(405, "不支援跨來源請求")
 
     def _route(self, method: str):
+        with LOCK:
+            STATE["active"] += 1          # 有請求處理中 (上傳/生成/轉檔) 時,程式不會自動結束
+        self._raw = b""
         try:
             if not self._host_ok():
+                self.close_connection = True
                 return self._err(403, "Host 不允許")
+            if method in ("POST", "DELETE"):   # 先把本體讀完,再決定回應 (大型上傳被拒絕時才不會變成「連線中斷」)
+                try:
+                    self._raw = self._read_raw()
+                except ValueError:
+                    self.close_connection = True
+                    return self._err(413, "內容過大")
             u = urlparse(self.path)
             if u.path.startswith("/api/"):
                 if not self._auth_ok():
@@ -309,6 +324,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._err(500, f"{type(e).__name__}: {e}")
             except Exception:
                 pass
+        finally:
+            with LOCK:
+                STATE["active"] -= 1
 
     # ---- 靜態檔 ----
     def _static(self, path: str):
@@ -339,7 +357,11 @@ class Handler(BaseHTTPRequestHandler):
                                     "ffmpeg": ffmpeg_info(settings), "out_dir": str(out_dir(settings))})
         if p == "ping":
             with LOCK:
-                STATE["last_ping"], STATE["pinged"] = time.time(), True
+                STATE["last_ping"], STATE["pinged"], STATE["bye_at"] = time.time(), True, 0.0
+            return self._json(200, {"ok": True})
+        if p == "bye":   # 視窗關閉 (pagehide)。短暫等待後自動結束;若只是重新整理,新頁面的 ping 會取消它
+            with LOCK:
+                STATE["bye_at"] = time.time()
             return self._json(200, {"ok": True})
         if p == "shutdown" and method == "POST":
             self._json(200, {"ok": True})
@@ -436,7 +458,9 @@ class Handler(BaseHTTPRequestHandler):
     # ---- Gemini 轉送 ----
     def _proxy(self, method: str, rest: str):
         path_only = rest.split("?", 1)[0]
-        if not (path_only == "/interactions" or path_only == "/voices" or path_only.startswith("/voices/")):
+        allowed = (path_only == "/interactions" or path_only == "/voices" or path_only.startswith("/voices/")
+                   or (method == "GET" and (path_only == "/models" or path_only.startswith("/models/"))))   # 模型清單 (唯讀)
+        if not allowed:
             return self._err(403, "不允許的 API 路徑")
         key = (self.headers.get("X-Goog-Api-Key") or "").strip() or api_key_source()[1]
         if not key:
@@ -544,7 +568,7 @@ def main() -> None:
     ap.add_argument("--browser", choices=["auto", "chrome", "edge", "default"], default=None,
                     help="開啟視窗用的瀏覽器 (預設讀取設置檔 gui_browser,再預設 auto = 優先 Chrome,其次 Edge)")
     ap.add_argument("--no-autoexit", action="store_true", help="關閉視窗後不自動結束程式")
-    ap.add_argument("--idle-timeout", type=float, default=25.0, help="視窗關閉多久後自動結束 (秒)")
+    ap.add_argument("--idle-timeout", type=float, default=900.0, help="完全沒有心跳多久後自動結束 (秒,預設 15 分鐘;正常關閉視窗會立刻通知,幾秒內結束)")
     ap.add_argument("--api-base", default=os.environ.get("TTS_API_BASE", DEFAULT_API_BASE), help=argparse.SUPPRESS)
     ap.add_argument("--site", default=None, help=argparse.SUPPRESS)
     args = ap.parse_args()
@@ -570,13 +594,19 @@ def main() -> None:
         def watchdog():
             started = time.time()
             while True:
-                time.sleep(2)
+                time.sleep(1)
                 with LOCK:
-                    pinged, last = STATE["pinged"], STATE["last_ping"]
-                if pinged and time.time() - last > args.idle_timeout:
+                    pinged, last, bye, active = STATE["pinged"], STATE["last_ping"], STATE["bye_at"], STATE["active"]
+                if active > 0:      # 還有請求在處理 (上傳/生成/轉檔中),不要結束
+                    continue
+                now = time.time()
+                if bye and now - bye > 8:
                     print("視窗已關閉,程式結束。")
                     os._exit(0)
-                if not pinged and time.time() - started > 300:
+                if pinged and now - last > args.idle_timeout:
+                    print(f"超過 {args.idle_timeout:.0f} 秒沒有收到視窗心跳 (視窗可能已被強制關閉),程式結束。")
+                    os._exit(0)
+                if not pinged and now - started > 300:
                     print("5 分鐘內沒有開啟視窗,程式結束。")
                     os._exit(0)
         threading.Thread(target=watchdog, daemon=True).start()

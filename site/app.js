@@ -69,7 +69,7 @@ const BIND = [
   ['out_format', 'text'], ['sample_rate', 'int'], ['bitrate', 'text'], ['loudnorm', 'bool'],
   ['speed', 'float'], ['keep_wav', 'bool'], ['autoplay', 'bool'], ['retries', 'int'],
   ['conversational', 'bool'], ['force_per_turn', 'bool'], ['gap_ms', 'int'], ['max_chars', 'int'], ['style', 'text'],
-  ['batch', 'bool'], ['auto_save', 'bool'], ['out_dir', 'text'], ['ffmpeg_path', 'text'], ['gui_browser', 'text'],
+  ['batch', 'bool'], ['auto_save', 'bool'], ['out_dir', 'text'], ['ffmpeg_path', 'text'], ['gui_browser', 'text'], ['models_show_all', 'bool'],
 ];
 
 function readField(k, t) {
@@ -78,6 +78,72 @@ function readField(k, t) {
   if (t === 'int') return Math.max(0, parseInt(el.value, 10) || 0);
   if (t === 'float') { const v = parseFloat(el.value); return Number.isFinite(v) ? Math.min(4, Math.max(0.25, v)) : 1; }
   return el.value.trim();
+}
+
+// --------------------------------------------------------------------------- //
+// 模型清單:向 API 取得你帳戶可用的模型,自動挑最新世代的語音模型 (不綁定特定版本)
+// --------------------------------------------------------------------------- //
+const MODELS_CACHE_KEY = 'tts.models.v2';
+const modelState = { raw: [], source: 'fallback', at: 0, loading: false, error: '', customMode: false };
+(function loadModelCache() {
+  try {
+    const j = JSON.parse(safeGet(localStorage, MODELS_CACHE_KEY) || 'null');
+    if (j && Array.isArray(j.raw) && j.raw.length) { modelState.raw = j.raw; modelState.at = j.at || 0; modelState.source = 'cache'; }
+  } catch { /* 忽略 */ }
+})();
+function currentModels() {
+  if (modelState.raw.length) return C.normalizeModelList(modelState.raw, cfg.models_show_all);
+  return C.FALLBACK_TTS_MODELS.map((id) => ({ id, displayName: '' }));
+}
+const resolveModelNow = () => C.resolveModel(cfg.model, currentModels());
+function renderModelSelect() {
+  const sel = $('#modelSel');
+  if (!sel) return;
+  const list = currentModels();
+  const auto = C.pickAutoModel(list) || C.FALLBACK_TTS_MODELS[0];
+  sel.textContent = '';
+  sel.add(new Option(`自動（推薦：${auto}）`, 'auto'));
+  for (const it of list) sel.add(new Option(it.displayName && it.displayName !== it.id ? `${it.id}（${it.displayName}）` : it.id, it.id));
+  sel.add(new Option('自訂模型 ID…', '__custom'));
+  const known = list.some((x) => x.id === cfg.model);
+  if (modelState.customMode || (cfg.model && cfg.model !== 'auto' && !known)) {   // 自訂模式 (含「剛選自訂、還沒填」的狀態)
+    modelState.customMode = true;
+    sel.value = '__custom';
+    if (cfg.model && cfg.model !== 'auto') $('#modelCustom').value = cfg.model;
+  } else if (!cfg.model || cfg.model === 'auto') { sel.value = 'auto'; $('#modelCustom').value = ''; }
+  else { sel.value = cfg.model; $('#modelCustom').value = ''; }
+  $('#modelCustomWrap').hidden = sel.value !== '__custom';
+  const src = { api: '已即時取得你帳戶可用的模型清單', cache: '使用上次取得的清單（連線後自動更新）', fallback: '離線備援清單（輸入 API Key 後會自動取得最新清單）' }[modelState.source];
+  const n = modelState.raw.length ? C.normalizeModelList(modelState.raw, false).length : list.length;
+  $('#modelNote').textContent = modelState.loading ? '正在取得模型清單…'
+    : `偵測到 ${n} 個語音（TTS）模型 · ${src}${modelState.error ? ` · ${modelState.error}` : ''}`;
+}
+async function refreshModels(force = false) {
+  if (!keyAvailable() || modelState.loading) { renderModelSelect(); return; }
+  if (!force && modelState.source === 'api') return;
+  if (!force && modelState.source === 'cache' && Date.now() - modelState.at < 12 * 3600 * 1000) { renderModelSelect(); return; }
+  modelState.loading = true; modelState.error = '';
+  renderModelSelect();
+  try {
+    const all = [];
+    let token = '';
+    for (let i = 0; i < 10; i++) {
+      const res = await apiFetch(`/models?pageSize=1000${token ? `&pageToken=${encodeURIComponent(token)}` : ''}`);
+      all.push(...(res.models || []));
+      token = res.nextPageToken || '';
+      if (!token) break;
+    }
+    modelState.raw = all.map((m) => ({ id: C.stripModelPrefix(m.name), displayName: m.displayName || '' })).filter((m) => m.id);
+    modelState.source = 'api'; modelState.at = Date.now();
+    safeSet(localStorage, MODELS_CACHE_KEY, JSON.stringify({ raw: modelState.raw, at: modelState.at }));
+    if (!C.normalizeModelList(modelState.raw, false).length) modelState.error = '清單中沒有名稱含 tts 的模型，可在進階選項勾選「顯示全部模型」';
+  } catch (e) {
+    modelState.error = `取得清單失敗：${e.message}`;
+  } finally {
+    modelState.loading = false;
+    renderModelSelect();
+    updateVisibility();
+  }
 }
 
 // 長金鑰 (voicekey_...) 只顯示頭尾,避免撐寬版面
@@ -96,7 +162,7 @@ function readForm() {
   for (const [k, t] of BIND) cfg[k] = readField(k, t);
   cfg.mode = document.querySelector('input[name=mode]:checked')?.value || 'single';
   const sel = $('#modelSel').value;
-  cfg.model = sel === '__custom' ? ($('#modelCustom').value.trim() || C.DEFAULTS.model) : sel;
+  cfg.model = sel === '__custom' ? (C.stripModelPrefix($('#modelCustom').value) || 'auto') : (sel || 'auto');
   const sp = parseSpeakers($('#speakers').value);
   if (sp.length) cfg.speakers = sp;
   // 講者語氣由各列輸入框即時寫入 cfg.speaker_styles
@@ -108,9 +174,7 @@ function fillForm() {
     if (t === 'bool') el.checked = !!cfg[k]; else el.value = cfg[k];
   }
   document.querySelector(`input[name=mode][value=${cfg.mode}]`).checked = true;
-  const known = [...$('#modelSel').options].some((o) => o.value === cfg.model && o.value !== '__custom');
-  $('#modelSel').value = known ? cfg.model : '__custom';
-  $('#modelCustom').value = known ? '' : cfg.model;
+  renderModelSelect();
   $('#speakers').value = cfg.speakers.join(', ');
   renderSpeakerRows();
   updateVisibility();
@@ -230,6 +294,24 @@ function persistKey() {
   else { safeSet(sessionStorage, KEY_KEY, k); safeDel(localStorage, KEY_KEY); }
 }
 
+const SERVICE_DOWN_MSG = '與本機服務的連線中斷（程式可能已被關閉）：請關閉這個視窗，再雙擊「啟動圖形介面.bat」重新開啟。';
+const fatal = (msg) => Object.assign(new Error(msg), { noRetry: true });   // 重試也不會好的錯誤 (不要白等重試)
+const STALE_MSG = '這個視窗已過期（本機服務曾重新啟動）：請關閉它，再雙擊「啟動圖形介面.bat」重新開啟。';
+function showServiceDown(msg) {
+  const b = $('#svcBanner');
+  b.textContent = msg;
+  b.hidden = false;
+}
+async function explainLocalFailure() {   // fetch 失敗時,判斷是「本機服務已停止」還是「網路/Google 問題」
+  try {
+    const r = await fetch('api/hello', { headers: { 'X-TTS-Token': rt.token }, signal: AbortSignal.timeout(3000) });
+    if (r.status === 403) { showServiceDown(STALE_MSG); return STALE_MSG; }
+    if (r.ok) return '連線被中斷，或 Google 沒有回應（請稍後再試）';
+  } catch { /* 連不上本機服務 */ }
+  showServiceDown(SERVICE_DOWN_MSG);
+  return SERVICE_DOWN_MSG;
+}
+
 async function apiFetch(path, { method = 'GET', body, signal } = {}) {
   const key = getKey();
   if (!keyAvailable()) throw new Error('請先輸入 API Key');
@@ -252,9 +334,14 @@ async function apiFetch(path, { method = 'GET', body, signal } = {}) {
     }
   } catch (e) {
     if (e.name === 'AbortError') throw e;
-    throw new Error(rt.local ? '無法連線到本機服務或網路中斷' : '無法連線到 Gemini API（網路中斷，或被瀏覽器的跨來源限制擋下）');
+    if (rt.local) {
+      const why = await explainLocalFailure();
+      throw why === SERVICE_DOWN_MSG || why === STALE_MSG ? fatal(why) : new Error(why);
+    }
+    throw new Error('無法連線到 Gemini API（網路中斷，或被瀏覽器的跨來源限制擋下）');
   }
   const txt = await res.text();
+  if (rt.local && res.status === 403 && /token/.test(txt)) { showServiceDown(STALE_MSG); throw fatal(STALE_MSG); }
   let json = null;
   try { json = JSON.parse(txt); } catch { /* 非 JSON */ }
   if (!res.ok) {
@@ -467,8 +554,10 @@ async function generate() {
   try {
     for (let i = 0; i < chunks.length; i++) {
       const tag = chunks.length > 1 ? `[${i + 1}/${chunks.length}] ` : '';
+      const model = resolveModelNow();
+      if (i === 0) log(`使用模型：${model}${cfg.model === 'auto' || !cfg.model ? '（自動選用最新語音模型）' : ''}`);
       const res = await C.runPipeline({
-        cfg: structuredClone(cfg),
+        cfg: { ...structuredClone(cfg), model },
         text: chunks[i],
         signal: ctl.signal,
         callApi: (body) => apiFetch('/interactions', { method: 'POST', body, signal: ctl.signal }),
@@ -641,7 +730,7 @@ async function refreshHello() {
 const LIB_KEY = 'tts.voicekeys.v1';
 const PREVIEW_TEXT = '你好，這是我的克隆聲音測試。Hello, this is a voice test.';
 const mine = { cloudToken: '', cloudLoaded: false };
-const cloneModel = () => (Object.values(C.MODELS).includes(cfg.model) ? cfg.model : C.MODELS['1']);
+const cloneModel = () => { const m = resolveModelNow(); return C.isTtsModelId(m) ? m : (C.pickAutoModel(currentModels()) || C.FALLBACK_TTS_MODELS[0]); };
 const labDlg = $('#labDlg');
 
 let libCache = null;
@@ -981,7 +1070,14 @@ async function init() {
   for (const [k] of BIND) $('#' + k).addEventListener('change', onFormChange);
   $('#style').addEventListener('input', onFormChange);
   document.querySelectorAll('input[name=mode]').forEach((r) => r.addEventListener('change', onFormChange));
-  $('#modelSel').addEventListener('change', onFormChange);
+  $('#modelSel').addEventListener('change', () => {
+    modelState.customMode = $('#modelSel').value === '__custom';
+    if (modelState.customMode) { $('#modelCustomWrap').hidden = false; $('#modelCustom').focus(); readForm(); saveCfg(); return; }
+    onFormChange();
+    renderModelSelect();
+  });
+  $('#modelRefresh').addEventListener('click', () => refreshModels(true));
+  $('#models_show_all').addEventListener('change', () => { onFormChange(); renderModelSelect(); });
   $('#modelCustom').addEventListener('input', onFormChange);
   $('#speakers').addEventListener('change', () => {
     readForm();
@@ -1015,7 +1111,7 @@ async function init() {
     i.type = i.type === 'password' ? 'text' : 'password';
     $('#keyToggle').textContent = i.type === 'password' ? '顯示' : '隱藏';
   });
-  $('#apiKey').addEventListener('change', persistKey);
+  $('#apiKey').addEventListener('change', () => { persistKey(); refreshModels(true); });
   $('#rememberKey').addEventListener('change', persistKey);
   $('#keyClear').addEventListener('click', async () => {
     $('#apiKey').value = '';
@@ -1107,11 +1203,25 @@ async function init() {
       try { await ljson('shutdown', 'POST', {}); } catch { /* ignore */ }
       document.body.innerHTML = '<p style="padding:2rem">程式已結束，可以關閉這個視窗。</p>';
     });
-    setInterval(() => { lfetch('ping', { method: 'POST' }).catch(() => {}); }, 5000);
-    lfetch('ping', { method: 'POST' }).catch(() => {});
+    // 心跳:讓本機服務知道視窗還在;連續失敗就明確告訴使用者服務已停止 (而不是等到按下按鈕才發現)
+    let pingFails = 0;
+    const ping = async () => {
+      try {
+        const r = await lfetch('ping', { method: 'POST' });
+        if (r.status === 403) { showServiceDown(STALE_MSG); return; }
+        if (!r.ok) throw new Error('ping');
+        pingFails = 0; $('#svcBanner').hidden = true;
+      } catch { if (++pingFails >= 2) showServiceDown(SERVICE_DOWN_MSG); }
+    };
+    setInterval(ping, 5000);
+    ping();
+    // 視窗關閉時通知服務 (它會等幾秒確認不是重新整理,再自動結束)
+    window.addEventListener('pagehide', () => { try { navigator.sendBeacon(`api/bye?t=${encodeURIComponent(rt.token)}`); } catch { /* ignore */ } });
     await refreshHello();
     refreshHistory();
   }
+
+  refreshModels();   // 取得你帳戶可用的最新模型清單 (有快取時會直接使用)
 
   // PWA (本機版不需要)
   if (rt.local) return;

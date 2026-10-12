@@ -1,10 +1,10 @@
 <div align="center">
 
-# Gemini 3.8 TTS
+# Gemini TTS
 
 **Text-to-speech web app (Android PWA) + local Windows GUI — voice cloning, multi-speaker dialogue, MP3/FLAC/Opus export**
 
-Built on Google's **Gemini 3.8 Flash TTS** API · bring your own API key · no third-party server
+Built on Google's **Gemini text-to-speech (TTS)** API · **always uses the newest TTS model your account can access** · bring your own API key · no third-party server
 
 [**▶ Live app**](https://b921603.github.io/gemini-tts/) · [繁體中文](README.md)
 
@@ -14,6 +14,7 @@ Built on Google's **Gemini 3.8 Flash TTS** API · bring your own API key · no t
 
 ## Features
 
+- **Newest model, automatically** — the app asks Google which models your account can use and picks the latest-generation TTS model by default, so a new model generation needs no update. You can also pin a version or type any model ID.
 - **Two ways to run, one UI** — a web app installable on Android (PWA), and a local Windows app window with native ffmpeg and automatic file saving.
 - **Voices** — type a name/ID, browse the live voice list (filter by language, gender, pitch), or pick from the 30 built-in voices; every voice has a ▶ **preview** that uses your own text and style.
 - **Single narrator or multi-speaker dialogue** — `Name[style]: text`; more than two speakers or custom voices are automatically synthesized turn by turn and stitched together.
@@ -56,6 +57,12 @@ docs/        screenshots and social preview image
 deploy.py    one-click publish tool (see SOP.md, Traditional Chinese)
 ```
 
+## Automatic model selection
+
+After you enter an API key the app calls Google's `models.list`, keeps models whose ID contains `tts`, and recommends one by: newer generation first → stable before preview → flash (balanced) before pro and lite.
+The default **Auto** option uses the newest TTS model at generation time; you can pin a specific version or type any model ID.
+When offline it falls back to the last list it fetched; if a future generation drops `tts` from its name, enable *Show all models* in Advanced options.
+
 ## FAQ
 
 **Is it free?** The tool is free; Gemini API usage is billed to your own API key — see [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing).
@@ -66,5 +73,5 @@ deploy.py    one-click publish tool (see SOP.md, Traditional Chinese)
 
 ---
 
-<sub>Keywords: Gemini TTS, Gemini 3.8 Flash TTS, text to speech, speech synthesis, voice cloning, voice replication, multi-speaker, Android PWA, ffmpeg.wasm, GitHub Pages.
+<sub>Keywords: Gemini TTS, Gemini Flash TTS, text to speech, speech synthesis, voice cloning, voice replication, multi-speaker, Android PWA, ffmpeg.wasm, GitHub Pages.
 Unofficial community tool, not affiliated with Google.</sub>

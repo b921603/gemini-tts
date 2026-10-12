@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gemini 3.8 TTS 互動式命令列工具 (Windows 11 / Python 3.10+)
+Gemini TTS 互動式命令列工具 (Windows 11 / Python 3.10+)
 
 功能
   * 人聲選擇: (1) 直接輸入名稱/ID  (2) 動態載入線上人聲清單並篩選  (3) 內建 30 種精選人聲
@@ -48,10 +48,75 @@ except Exception:
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_SETTINGS_FILE = SCRIPT_DIR / "tts_settings.json"
 
-MODELS = {
-    "1": "gemini-3.8-flash-tts",
-    "2": "gemini-3.8-flash-lite-tts",
-}
+# --------------------------------------------------------------------------- #
+# 模型探索:不綁定任何特定世代。平常以 API (models.list) 即時回傳的清單為準,
+# 自動挑「最新世代」的語音模型;下一代模型出現時不需要改程式。(邏輯與網頁版 core.js 完全一致)
+# --------------------------------------------------------------------------- #
+FALLBACK_TTS_MODELS = ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"]   # 僅在無法取得線上清單時使用
+_TIER_ORDER = {"flash": 0, "pro": 1, "lite": 2, "other": 3}
+_MODELS_CACHE: list[dict] | None = None
+
+
+def strip_model_prefix(n) -> str:
+    return re.sub(r"^models/", "", str(n or "").strip())
+
+
+def is_tts_model(mid: str) -> bool:
+    return bool(re.search(r"tts", mid or "", re.I))
+
+
+def parse_model_id(mid: str):
+    m = re.search(r"(?:^|-)(\d+(?:\.\d+)*)(?=-|$)", mid or "")
+    version = [int(x) for x in m.group(1).split(".")] if m else [0]
+    tier = "lite" if re.search("lite", mid, re.I) else "pro" if re.search("pro", mid, re.I) else \
+        "flash" if re.search("flash", mid, re.I) else "other"
+    return version, tier, bool(re.search(r"preview|exp", mid or "", re.I))
+
+
+def _model_sort_key(item: dict):
+    mid = item["id"]
+    version, tier, preview = parse_model_id(mid)
+    # 最佳在前: 語音模型 → 版本新 → 正式版優先於 preview → flash(均衡) > pro > lite → ID 字母序
+    return (0 if is_tts_model(mid) else 1, [-v for v in version] + [0] * (6 - len(version)), preview, _TIER_ORDER[tier], mid)
+
+
+def normalize_model_list(raw: list[dict], show_all: bool = False) -> list[dict]:
+    seen, out = set(), []
+    for m in raw or []:
+        mid = strip_model_prefix(m.get("id") or m.get("name"))
+        if not mid or mid in seen or (not show_all and not is_tts_model(mid)):
+            continue
+        seen.add(mid)
+        out.append({"id": mid, "display": m.get("display") or m.get("display_name") or ""})
+    return sorted(out, key=_model_sort_key)
+
+
+def pick_auto_model(items: list[dict]) -> str:
+    for it in items or []:
+        if is_tts_model(it["id"]):
+            return it["id"]
+    return items[0]["id"] if items else ""
+
+
+def resolve_model(model: str, items: list[dict] | None = None) -> str:
+    m = strip_model_prefix(model)
+    if not m or m == "auto":
+        return pick_auto_model(items or []) or FALLBACK_TTS_MODELS[0]
+    return m
+
+
+def discover_models(client, show_all: bool = False, refresh: bool = False) -> list[dict]:
+    """向 API 取得可用模型 (含快取於本次執行);失敗時回傳備援清單"""
+    global _MODELS_CACHE
+    if _MODELS_CACHE is None or refresh:
+        try:
+            raw = [{"name": g(m, "name"), "display": g(m, "display_name")} for m in client.models.list()]
+            _MODELS_CACHE = raw if raw else []
+        except Exception as e:
+            print(f"[!] 無法取得模型清單 ({type(e).__name__}: {e}),改用備援清單。")
+            _MODELS_CACHE = []
+    items = normalize_model_list(_MODELS_CACHE, show_all)
+    return items or [{"id": m, "display": ""} for m in FALLBACK_TTS_MODELS]
 
 BUILTIN_VOICES = [
     ("Zephyr", "Bright"), ("Puck", "Upbeat"), ("Charon", "Informative"),
@@ -248,7 +313,8 @@ CONSENT_PHRASES = [
 ]
 
 DEFAULTS = {
-    "model": MODELS["1"],
+    "model": "auto",                # auto = 自動選用目前最新的語音(TTS)模型;也可填具體模型 ID
+    "models_show_all": False,
     "mode": "single",              # single / multi
     "voice": "Kore",
     "style": "",
@@ -591,7 +657,8 @@ def save_lib(items: list[dict]) -> None:
 
 
 def clone_model(cfg: dict) -> str:
-    return cfg["model"] if cfg["model"] in MODELS.values() else MODELS["1"]
+    m = resolve_model(cfg["model"], normalize_model_list(_MODELS_CACHE or [], cfg.get("models_show_all", False)))
+    return m if is_tts_model(m) else (pick_auto_model(normalize_model_list(_MODELS_CACHE or [])) or FALLBACK_TTS_MODELS[0])
 
 
 def wav_info(data: bytes) -> tuple[int, int, int, float]:
@@ -846,6 +913,7 @@ def manage_list(title: str, rows: list[tuple[str, str, str, bool]], client, cfg,
 
 def voice_lab(client, cfg: dict) -> str | None:
     """音色克隆選單。回傳選用的 voice 字串 (voice_… / voicekey_…),或 None。"""
+    discover_models(client, cfg.get("models_show_all", False))   # 取得模型清單,建立克隆/試聽時使用最新語音模型
     while True:
         k = ask_menu("我的克隆聲音", [
             ("1", "建立新的克隆聲音"),
@@ -890,15 +958,37 @@ def voice_lab(client, cfg: dict) -> str | None:
 # --------------------------------------------------------------------------- #
 # 設定流程
 # --------------------------------------------------------------------------- #
-def configure_general(cfg: dict) -> None:
+def choose_model(client, cfg: dict) -> None:
+    items = discover_models(client, cfg.get("models_show_all", False))
+    auto = pick_auto_model(items)
     cur = cfg["model"]
-    default = "1" if cur == MODELS["1"] else "2" if cur == MODELS["2"] else "3"
-    k = ask_menu("選擇模型", [
-        ("1", f"{MODELS['1']}  (最高表現力/保真度)"),
-        ("2", f"{MODELS['2']}  (快速、省成本)"),
-        ("3", "自訂模型 ID"),
-    ], default)
-    cfg["model"] = MODELS.get(k) or ask("模型 ID", cur)
+    opts = [("0", f"自動 (推薦: {auto})")]
+    for i, it in enumerate(items, 1):
+        label = it["id"] + (f"  ({it['display']})" if it["display"] and it["display"] != it["id"] else "")
+        opts.append((str(i), label))
+    opts += [("a", "顯示全部模型 (含名稱不含 tts 的) / 重新載入清單"), ("c", "自訂模型 ID")]
+    default = "0" if cur in ("", "auto") else next((str(i) for i, it in enumerate(items, 1) if it["id"] == cur), "c")
+    while True:
+        k = ask_menu(f"選擇模型 (偵測到 {len([x for x in items if is_tts_model(x['id'])])} 個語音模型)", opts, default)
+        if k == "a":
+            cfg["models_show_all"] = not cfg.get("models_show_all", False)
+            print(f"  已{'開啟' if cfg['models_show_all'] else '關閉'}「顯示全部模型」,重新載入 …")
+            discover_models(client, cfg["models_show_all"], refresh=True)
+            return choose_model(client, cfg)
+        break
+    if k == "0":
+        cfg["model"] = "auto"
+    elif k == "c":
+        cfg["model"] = strip_model_prefix(ask("模型 ID", cur if cur != "auto" else auto)) or "auto"
+    else:
+        cfg["model"] = items[int(k) - 1]["id"]
+
+
+def configure_general(cfg: dict, client=None) -> None:
+    if client is not None:
+        choose_model(client, cfg)
+    else:
+        cfg["model"] = strip_model_prefix(ask("模型 ID (auto = 自動選用最新語音模型)", cfg["model"])) or "auto"
 
     k = ask_menu("生成模式", [("1", "單人旁白"), ("2", "多人對話")],
                  "1" if cfg["mode"] == "single" else "2")
@@ -1375,7 +1465,7 @@ def write_output(cfg, data: bytes, kind: str, per_turn: bool, need_ff: bool, ff,
 # 主流程
 # --------------------------------------------------------------------------- #
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Gemini 3.8 TTS 互動式工具")
+    ap = argparse.ArgumentParser(description="Gemini TTS 互動式工具")
     ap.add_argument("--reuse", action="store_true", help="直接沿用上次設置,只詢問文本")
     ap.add_argument("--text", help="直接指定文本 (略過文本輸入選單)")
     ap.add_argument("--text-file", help="從文字檔讀取文本 (UTF-8)")
@@ -1396,7 +1486,7 @@ def main() -> None:
             print("[!] 找不到 tts_gui.py (需與 tts.py 放在同一個資料夾)")
             return
         sys.exit(subprocess.call([sys.executable, str(gui)]))
-    print("=== Gemini 3.8 TTS 互動式工具 ===")
+    print("=== Gemini TTS 互動式工具 ===")
     if args.clone:   # 只做音色克隆管理,不進入生成流程
         client = make_client()
         v = voice_lab(client, cfg)
@@ -1425,7 +1515,7 @@ def main() -> None:
     client = make_client()
 
     if not reuse:
-        configure_general(cfg)
+        configure_general(cfg, client)
     configure_voices(client, cfg, reuse)
     save_settings(settings_path, cfg)
 
@@ -1449,6 +1539,9 @@ def main() -> None:
         print(f"[i] 文本已自動分成 {len(segments)} 段,將逐段合成後拼接。")
 
     run_cfg = dict(cfg)  # 本次實際使用 (ffmpeg 不可用時會降級,不寫回設置檔)
+    if cfg["model"] in ("", "auto"):
+        run_cfg["model"] = resolve_model("auto", discover_models(client, cfg.get("models_show_all", False)))
+        print(f"[i] 自動選用模型: {run_cfg['model']}")
     need_ff = needs_ffmpeg(run_cfg, per_turn)
     ff = None
     if need_ff:
