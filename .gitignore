@@ -2,6 +2,7 @@
 local/tts_settings.json
 local/tts_voices.json
 local/.gemini_key
+local/selftest_report.txt
 local/output/
 .env
 *.key

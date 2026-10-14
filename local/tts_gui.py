@@ -388,7 +388,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == "key":
             if method == "POST":
                 k = str(json.loads(self._body() or b"{}").get("key", "")).strip()
-                if not re.fullmatch(r"[A-Za-z0-9_\-]{20,200}", k):
+                if not re.fullmatch(r"[A-Za-z0-9_.\-]{20,300}", k):   # 含新格式金鑰 (AQ.xxxx,內含「.」)
                     return self._err(400, "金鑰格式看起來不正確")
                 KEY_FILE.write_text(k, encoding="utf-8")
                 try:

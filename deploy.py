@@ -39,11 +39,12 @@ except Exception:
 
 ROOT = Path(__file__).resolve().parent
 MANAGED_DIRS = ["site", ".github", "local", "docs"]          # 以更新檔為準同步 (只會刪除「已被追蹤」且更新檔裡沒有的檔案)
-MANAGED_FILES = ["README.md", "README.en.md", "deploy.py", ".gitignore", "啟動圖形介面.bat", "啟動命令列.bat"]
+MANAGED_FILES = ["README.md", "README.en.md", "deploy.py", ".gitignore", "啟動圖形介面.bat", "啟動命令列.bat", "啟動自我檢測.bat"]
 # 注意: 「一鍵推送.bat」不在清單內,因為它正在執行時不能被覆蓋
 UNTRACK_FILES = ["SOP.md"]      # 維護者私人文件:不放進公開倉庫。若曾被推送過,會自動從倉庫移除 (本機檔案保留)
 SECRET_PATTERNS = [
     (re.compile(r"AIza[0-9A-Za-z_\-]{35}"), "Google API Key"),
+    (re.compile(r"\bAQ\.[0-9A-Za-z_\-]{30,}"), "Google API Key (新格式 AQ.…)"),
     (re.compile(r"voicekey_[A-Za-z0-9_\-]{20,}"), "克隆聲音金鑰 (voicekey_…)"),
 ]
 FORBIDDEN_NAMES = {"tts_settings.json", "tts_voices.json", ".gemini_key", ".env"}

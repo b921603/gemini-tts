@@ -17,6 +17,7 @@ Built on Google's **Gemini text-to-speech (TTS)** API · **always uses the newes
 - **Newest model, automatically** — the app asks Google which models your account can use and picks the latest-generation TTS model by default, so a new model generation needs no update. You can also pin a version or type any model ID.
 - **Visible progress** — four stages (sent → Google processing → receiving audio → finishing) plus, via the official streaming mode, the seconds of audio generated so far and an estimated time left (the API gives no percentage, so the estimate is approximate); falls back to normal mode if streaming is unavailable.
 - **Quota-friendly previews** — ▶ preview synthesizes **one short sample sentence** (about 2–3 s of audio) and caches it on your device, so replays cost nothing; voices made with Voice design use the official sample audio.
+- **Recent generations** — the web app keeps your audio in your browser (IndexedDB, never uploaded; up to 50 items / 200 MB) so it survives reloads, with play / download / share / delete; the desktop app saves to its output folder.
 - **Two ways to run, one UI** — a web app installable on Android (PWA), and a local Windows app window with native ffmpeg and automatic file saving.
 - **Voices** — type a name/ID, browse the live voice list (filter by language, gender, pitch), or pick from the 30 built-in voices; every voice has a ▶ **preview** that uses your own text and style.
 - **Single narrator or multi-speaker dialogue** — `Name[style]: text`; more than two speakers or custom voices are automatically synthesized turn by turn and stitched together.
@@ -53,7 +54,7 @@ Only clone **your own** voice, or the voice of an **adult who has given explicit
 
 ```
 site/        web app (deployed to GitHub Pages)
-local/       desktop: tts_gui.py (GUI), tts.py (CLI)
+local/       desktop: tts_gui.py (GUI), tts.py (CLI), selftest.py (live API check with your own key; the report masks keys)
 docs/        screenshots and social preview image
 .github/     deploy workflow and repository metadata (repo-meta.json)
 deploy.py    maintainer's one-click publish tool

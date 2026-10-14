@@ -168,10 +168,14 @@
 
   <section id="results" aria-live="polite"></section>
 
-  <details id="historyWrap" class="card local-only" hidden>
-    <summary>最近生成（輸出資料夾）</summary>
+  <details id="historyWrap" class="card">
+    <summary>最近生成</summary>
+    <p id="histNote" class="hint"></p>
     <ul id="historyList" class="mlist"></ul>
-    <button type="button" id="historyRefresh" class="small">重新整理</button>
+    <div class="row wrap">
+      <button type="button" id="historyRefresh" class="small">重新整理</button>
+      <button type="button" id="historyClear" class="small danger" hidden>全部清除</button>
+    </div>
   </details>
 
   <details id="logWrap" class="card">

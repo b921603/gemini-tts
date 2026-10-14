@@ -1,6 +1,7 @@
 // app.js — UI 層 (設定儲存、人聲選擇器、ffmpeg.wasm 載入、生成與結果)
 import * as C from './core.js';
 import { CONSENT_PHRASES } from './consent.js';
+import { createHistory } from './history.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const SETTINGS_KEY = 'tts.settings.v1';
@@ -667,7 +668,11 @@ async function generate() {
         const u = Object.entries(res.usage).map(([k, v]) => `${k}=${v}`).join('、');
         log(`${tag}Google 回報的用量：${u}`);
       }
-      addResults(res.outputs, chunks.length > 1 ? `${stem}_${String(i + 1).padStart(3, '0')}` : stem, res.runCfg, i === 0);
+      addResults(res.outputs, chunks.length > 1 ? `${stem}_${String(i + 1).padStart(3, '0')}` : stem, res.runCfg, i === 0, {
+        text: chunks[i].replace(/\s+/g, ' ').slice(0, 60),
+        voice: cfg.mode === 'single' ? cfg.voice : cfg.speakers.map((n) => `${n}:${cfg.speaker_voices[n] || ''}`).join(', '),
+        model,
+      });
       done++;
       lastRun = res.runCfg;
       log(`${tag}完成：${res.outputs.map((o) => o.label).join('、')}`);
@@ -691,7 +696,8 @@ async function generate() {
 }
 
 const results = [];
-function addResults(outputs, stem, runCfg, autoplayOk = true) {
+const hist = createHistory();   // 網頁版:最近生成 (IndexedDB)
+function addResults(outputs, stem, runCfg, autoplayOk = true, info = {}) {
   const box = $('#results');
   outputs.forEach((o, idx) => {
     const isOriginalCopy = outputs.length > 1 && o.label === '原始 WAV';
@@ -749,6 +755,7 @@ function addResults(outputs, stem, runCfg, autoplayOk = true) {
     box.prepend(card);
     results.push(url);
     if (rt.local && runCfg.auto_save !== false) saveToDisk(name, o.bytes, meta, row, rm);
+    else if (!rt.local) histAdd(name, o, info, meta);
     if (idx === 0 && audio && runCfg.autoplay && autoplayOk) audio.play().catch(() => {});
     if (idx === 0) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });
@@ -769,15 +776,38 @@ async function saveToDisk(name, bytes, metaEl, row, beforeEl) {
   } catch (e) { metaEl.textContent += ` · 儲存失敗：${e.message}`; }
 }
 
-async function refreshHistory() {
-  if (!rt.local) return;
-  const ul = $('#historyList');
+async function histAdd(name, o, info, metaEl) {
   try {
-    const items = await ljson('history');
+    await hist.add({ name, ext: o.ext, mime: o.mime, fmt: o.fmt, label: o.label, bytes: o.bytes, text: info.text || '', voice: info.voice || '', model: info.model || '' });
+    navigator.storage?.persist?.().catch(() => {});      // 請瀏覽器盡量不要自動清除這些資料
+    refreshHistory();
+  } catch (e) {
+    $('#histNote').textContent = `無法保留到「最近生成」：${e.message}（此瀏覽器可能停用了本機儲存，例如無痕模式）`;
+    if (metaEl) metaEl.textContent += ' · 未保留到「最近生成」（此瀏覽器停用了本機儲存，請記得下載）';   // 直接顯示在結果上,使用者才看得到
+  }
+}
+
+async function refreshHistory() {
+  const ul = $('#historyList');
+  const note = $('#histNote');
+  try {
+    let items;
+    if (rt.local) {
+      items = (await ljson('history')).map((it) => ({ key: it.name, name: it.name, size: it.size, at: it.mtime * 1000, sub: '' }));
+      note.textContent = '音檔存放在輸出資料夾（最近 30 個）。';
+    } else {
+      items = (await hist.list()).map((m) => ({ key: m.id, name: m.name, size: m.size, at: m.createdAt, mime: m.mime, ext: m.ext,
+        sub: [m.voice && `人聲 ${showVoice(m.voice)}`, m.text && `「${m.text}」`].filter(Boolean).join(' · ') }));
+      const st = await hist.stats();
+      let quota = '';
+      try { const e = await navigator.storage.estimate(); quota = ` · 瀏覽器儲存空間已用 ${fmtSize(e.usage)}`; } catch { /* 不支援 */ }
+      note.textContent = `音檔只存在這個瀏覽器（不會上傳）：${st.count} 筆，共 ${fmtSize(st.bytes)}（最多 ${st.maxItems} 筆／${fmtSize(st.maxBytes)}，超過自動刪除最舊的）${quota}。清除瀏覽器資料也會一併刪除。`;
+    }
     ul.textContent = '';
+    $('#historyClear').hidden = rt.local || !items.length;
     if (!items.length) {
       const li = document.createElement('li');
-      li.className = 'hint'; li.textContent = '（輸出資料夾目前沒有音檔）';
+      li.className = 'hint'; li.textContent = '（還沒有生成紀錄）';
       ul.appendChild(li);
       return;
     }
@@ -785,30 +815,54 @@ async function refreshHistory() {
       const li = document.createElement('li');
       const n = document.createElement('div'); n.className = 'm-name'; n.textContent = it.name;
       const m = document.createElement('div'); m.className = 'm-meta';
-      m.textContent = `${fmtSize(it.size)} · ${new Date(it.mtime * 1000).toLocaleString()}`;
+      m.textContent = `${fmtSize(it.size)} · ${new Date(it.at).toLocaleString()}${it.sub ? ` · ${it.sub}` : ''}`;
       const row = document.createElement('div'); row.className = 'row';
       const holder = document.createElement('div');
       const ext = it.name.slice(it.name.lastIndexOf('.')).toLowerCase();
       const inline = ['.wav', '.mp3', '.flac', '.ogg', '.opus', '.m4a'].includes(ext);
-      row.append(
-        mkBtn('播放', () => {
-          if (!inline) { ljson('open', 'POST', { name: it.name }); return; }
-          if (holder.firstChild) { holder.firstChild.pause(); holder.textContent = ''; return; }
-          const a = document.createElement('audio');
-          a.controls = true; a.autoplay = true; a.className = 'inline';
-          a.src = `api/file?name=${encodeURIComponent(it.name)}&t=${encodeURIComponent(rt.token)}`;
-          holder.appendChild(a);
-        }, 'small'),
-        mkBtn('開啟資料夾', () => ljson('open', 'POST', { name: it.name, folder: true }), 'small'),
-        mkBtn('刪除', async () => {
-          if (!confirm(`刪除「${it.name}」？此動作無法復原。`)) return;
-          try { await ljson('delete', 'POST', { name: it.name }); refreshHistory(); } catch (e) { setStatus(`刪除失敗：${e.message}`, 'error'); }
-        }, 'small danger'),
-      );
+      const toggle = (src) => {
+        if (holder.firstChild) { holder.firstChild.pause(); holder.textContent = ''; return; }
+        const a = document.createElement('audio');
+        a.controls = true; a.autoplay = true; a.className = 'inline'; a.src = src;
+        holder.appendChild(a);
+      };
+      if (rt.local) {
+        row.append(
+          mkBtn('播放', () => { if (!inline) { ljson('open', 'POST', { name: it.key }); return; } toggle(`api/file?name=${encodeURIComponent(it.key)}&t=${encodeURIComponent(rt.token)}`); }, 'small'),
+          mkBtn('開啟資料夾', () => ljson('open', 'POST', { name: it.key, folder: true }), 'small'),
+          mkBtn('刪除', async () => {
+            if (!confirm(`刪除「${it.name}」？此動作無法復原。`)) return;
+            try { await ljson('delete', 'POST', { name: it.key }); refreshHistory(); } catch (e) { setStatus(`刪除失敗：${e.message}`, 'error'); }
+          }, 'small danger'),
+        );
+      } else {
+        const blobUrl = async () => {
+          const bytes = await hist.getBytes(it.key);
+          if (!bytes) throw new Error('找不到音檔 (可能已被瀏覽器清除)');
+          return { url: URL.createObjectURL(new Blob([bytes], { type: it.mime })), bytes };
+        };
+        if (inline) row.append(mkBtn('播放', async () => { if (holder.firstChild) { toggle(); return; } try { toggle((await blobUrl()).url); } catch (e) { setStatus(e.message, 'error'); } }, 'small'));
+        row.append(mkBtn('下載', async () => {
+          try {
+            const { url } = await blobUrl();
+            const a = document.createElement('a'); a.href = url; a.download = it.name; a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 10000);
+          } catch (e) { setStatus(e.message, 'error'); }
+        }, 'small'));
+        if (navigator.canShare) row.append(mkBtn('分享', async () => {
+          try {
+            const { bytes } = await blobUrl();
+            const file = new File([bytes], it.name, { type: it.mime });
+            if (navigator.canShare({ files: [file] })) await navigator.share({ files: [file], title: it.name });
+            else setStatus('這個瀏覽器無法分享檔案，請改用「下載」', 'warn');
+          } catch (e) { if (e.name !== 'AbortError') setStatus(`分享失敗：${e.message}`, 'error'); }
+        }, 'small'));
+        row.append(mkBtn('刪除', async () => { await hist.remove(it.key); refreshHistory(); }, 'small danger'));
+      }
       li.append(n, m, row, holder);
       ul.appendChild(li);
     }
-  } catch (e) { ul.textContent = `載入失敗：${e.message}`; }
+  } catch (e) { ul.textContent = `載入失敗：${e.message}`; note.textContent = ''; }
 }
 
 async function refreshHello() {
@@ -1406,6 +1460,8 @@ async function init() {
     setStatus('已重設為預設', 'ok');
   });
 
+  $('#historyRefresh').addEventListener('click', refreshHistory);
+  $('#historyClear').addEventListener('click', async () => { if (!confirm('清除所有「最近生成」的音檔？此動作無法復原。')) return; await hist.clear(); refreshHistory(); });
   $('#genBtn').addEventListener('click', generate);
   $('#cancelBtn').addEventListener('click', () => ctl?.abort());
   $('#text').addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); generate(); } });
@@ -1413,7 +1469,6 @@ async function init() {
   // 本機版專用
   if (rt.local) {
     $('#openOut').addEventListener('click', () => ljson('open', 'POST', {}).catch((e) => setStatus(e.message, 'error')));
-    $('#historyRefresh').addEventListener('click', refreshHistory);
     $('#ffmpeg_path').addEventListener('change', async () => { await flushCfg(); await refreshHello(); });
     $('#out_dir').addEventListener('change', async () => { await flushCfg(); await refreshHello(); refreshHistory(); });
     $('#installFf').addEventListener('click', async () => {
@@ -1451,6 +1506,7 @@ async function init() {
   }
 
   refreshModels();   // 取得你帳戶可用的最新模型清單 (有快取時會直接使用)
+  if (!rt.local) refreshHistory();
 
   // PWA (本機版不需要)
   if (rt.local) return;

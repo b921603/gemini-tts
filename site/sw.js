@@ -1,7 +1,7 @@
 // Service Worker: 外殼網路優先(確保更新),ffmpeg 大檔案快取優先(獨立快取,更新 App 不會丟掉 31 MB)
 const SHELL_CACHE = 'tts-shell-v1';
 const VENDOR_CACHE = 'tts-vendor-v1';
-const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'core.js', 'consent.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
+const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'core.js', 'consent.js', 'history.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL_CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
