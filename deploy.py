@@ -29,7 +29,7 @@ import urllib.request
 import webbrowser
 import zipfile
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -48,6 +48,14 @@ SECRET_PATTERNS = [
     (re.compile(r"voicekey_[A-Za-z0-9_\-]{20,}"), "克隆聲音金鑰 (voicekey_…)"),
 ]
 FORBIDDEN_NAMES = {"tts_settings.json", "tts_voices.json", ".gemini_key", ".env"}
+# ---- 第二層保護:只允許推送「專案本身」的檔案 (即使 .gitignore 被改壞/被 git add -f 強制加入也一樣) ----
+BLOCKED_SUFFIXES = {".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".pcm", ".mulaw", ".alaw", ".srt", ".vtt", ".lrc",
+                    ".log", ".tmp", ".bak", ".swp", ".zip", ".key", ".pem", ".p12", ".pfx"}
+BLOCKED_DIRS = {"output", "selftest_audio", "__pycache__", "node_modules", "ffbuild", ".venv", "venv"}
+BLOCKED_NAME_RE = re.compile(r"^(tts_(settings|voices).*\.json|\.gemini_key|selftest_report.*|\.env.*|Thumbs\.db|desktop\.ini|\.DS_Store)$", re.I)
+ALLOWED_ROOT_FILES = set(MANAGED_FILES) | {".gitignore", "一鍵推送.bat", "LICENSE", "LICENSE.md", "LICENSE.txt", "NOTICE", "CONTRIBUTING.md",
+                                          "CODE_OF_CONDUCT.md", "SECURITY.md", "CHANGELOG.md", "CITATION.cff", ".gitattributes"}
+DOC_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", ".md"}
 MAX_FILE_MB = 50
 STATE_FILE = ROOT / ".git" / "deploy_state.json"
 META_FILE = ROOT / ".github" / "repo-meta.json"        # 專案頁「About」說明 / 網站 / Topics 的定義 (跟著更新檔一起維護)
@@ -192,6 +200,46 @@ def sync_from_zip(zpath: Path) -> int:
 # --------------------------------------------------------------------------- #
 # 安全檢查
 # --------------------------------------------------------------------------- #
+def is_dangerous(path: str) -> bool:
+    """明確屬於「生成物/機密/本機資料」的檔案 (若已被追蹤,會自動從倉庫移除;本機檔案保留)"""
+    p = PurePosixPath(path)
+    if p.suffix.lower() in BLOCKED_SUFFIXES or BLOCKED_NAME_RE.match(p.name) or p.name in FORBIDDEN_NAMES:
+        return True
+    return any(part in BLOCKED_DIRS for part in p.parts) or ("site" == p.parts[0] and "vendor" in p.parts)
+
+
+def is_allowed(path: str) -> bool:
+    """只有專案本身的檔案可以推送"""
+    p = PurePosixPath(path)
+    if is_dangerous(path):
+        return False
+    if len(p.parts) == 1:
+        return p.name in ALLOWED_ROOT_FILES
+    top = p.parts[0]
+    if top in ("site", ".github"):
+        return True
+    if top == "local":
+        return len(p.parts) == 2 and p.suffix == ".py"
+    if top == "docs":
+        return p.suffix.lower() in DOC_SUFFIXES
+    return False
+
+
+def enforce_allowlist() -> tuple[list[str], list[str]]:
+    """① 已被追蹤的危險檔案 (音檔、金鑰、報告…) 自動從倉庫移除 (本機保留);② 本次新增/修改但不屬於專案的檔案自動排除。
+    回傳 (已從追蹤移除, 本次排除)"""
+    untracked, excluded = [], []
+    for f in git("ls-files").splitlines():
+        if f and is_dangerous(f):
+            git("rm", "--cached", "-q", "--", f)
+            untracked.append(f)
+    for f in git("diff", "--cached", "--name-only", "--diff-filter=AMRC").splitlines():
+        if f and not is_allowed(f):
+            git("reset", "-q", "--", f, check=False)
+            excluded.append(f)
+    return untracked, excluded
+
+
 def untrack_private_files() -> list[str]:
     """把「不該在倉庫裡」的私人檔案從追蹤中移除 (git rm --cached,本機檔案保留;.gitignore 會防止再被加入)"""
     removed = []
@@ -488,6 +536,11 @@ def main() -> int:
     for f in untrack_private_files():
         print(f"已從儲存庫移除 {f}（只移除追蹤，你電腦上的檔案保留；之後不會再被推送）")
     git("add", "-A")
+    untracked, excluded = enforce_allowlist()
+    if untracked:
+        print("\n已從儲存庫移除這些不該公開的檔案 (只移除追蹤,你電腦上的檔案保留):\n  - " + "\n  - ".join(untracked[:20]) + (f"\n  …共 {len(untracked)} 個" if len(untracked) > 20 else ""))
+    if excluded:
+        print(f"\n已自動排除 {len(excluded)} 個不屬於專案的檔案 (不會上傳):\n  - " + "\n  - ".join(excluded[:20]) + (f"\n  …共 {len(excluded)} 個" if len(excluded) > 20 else ""))
     problems = scan_staged()
     if problems:
         git("reset", "-q", check=False)

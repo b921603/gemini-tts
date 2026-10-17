@@ -1,18 +1,60 @@
-# ===== 機密與本機資料:絕對不要推送 =====
-local/tts_settings.json
-local/tts_voices.json
-local/.gemini_key
-local/selftest_report.txt
-local/output/
-.env
-*.key
+# ======================================================================
+# 這個檔案決定「哪些東西永遠不會被推送到 GitHub」。
+# deploy.py 另有第二層保護 (只允許推送專案本身的檔案),兩層都不可跳過。
+# ======================================================================
 
-# ===== 維護者私人文件 (不放進公開倉庫) =====
+# ===== 機密與本機資料 =====
 SOP.md
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+**/.gemini_key
+**/tts_settings*.json
+**/tts_voices*.json
+**/selftest_report*.txt
+**/selftest_audio/
 
-# ===== 暫存 / 產生物 =====
+# ===== 生成出來的音檔、字幕與輸出資料夾 (任何位置) =====
+output/
+**/output/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.opus
+*.m4a
+*.aac
+*.pcm
+*.mulaw
+*.alaw
+*.srt
+*.vtt
+*.lrc
+
+# ===== 日誌、暫存、備份 =====
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+~$*
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ===== 編輯器、環境、套件 =====
+.vscode/
+.idea/
 __pycache__/
 *.pyc
+.venv/
+venv/
+node_modules/
+
+# ===== 部署產生物與下載的更新檔 =====
 ffbuild/
 site/vendor/
 *.zip

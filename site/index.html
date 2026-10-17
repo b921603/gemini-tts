@@ -123,6 +123,34 @@
       <label class="chk"><input type="checkbox" id="loudnorm"> 響度標準化 loudnorm（ffmpeg）</label>
       <label class="chk"><input type="checkbox" id="keep_wav"> 經 ffmpeg 轉檔時，同時保留原始 WAV</label>
       <label class="chk"><input type="checkbox" id="models_show_all"> 模型清單顯示全部模型（預設只列名稱含 tts 的語音模型）</label>
+      <h4>進階生成參數 <small>（留空＝使用模型預設）</small></h4>
+      <div class="grid">
+        <label>temperature（0–2）<input id="gen_temperature" type="text" inputmode="decimal" autocomplete="off" placeholder="預設"></label>
+        <label>top_p（0–1）<input id="gen_top_p" type="text" inputmode="decimal" autocomplete="off" placeholder="預設"></label>
+        <label>seed（整數）<input id="gen_seed" type="text" inputmode="numeric" autocomplete="off" placeholder="預設（隨機）"></label>
+        <label>max_output_tokens <input id="gen_max_tokens" type="text" inputmode="numeric" autocomplete="off" placeholder="預設（不建議設定）"></label>
+      </div>
+      <label class="chk"><input type="checkbox" id="gen_seed_auto"> 每次自動指定隨機種子並記錄在「執行紀錄」（喜歡某個版本時，把種子填進 seed 就能重現）</label>
+      <label>額外 generation_config（JSON，進階）
+        <textarea id="gen_extra" rows="2" spellcheck="false" placeholder='{"stop_sequences": ["END"]}'></textarea></label>
+      <p class="hint">這是官方 Interactions API 實際支援的參數；<b>該 API 沒有 top_k</b>。各 TTS 模型是否都遵循這些參數，官方沒有說明；模型若拒絕某個參數，程式會自動略過它並重試。⚠ max_output_tokens 設太小會讓語音被截斷。</p>
+      <p id="genPreview" class="hint genpreview"></p>
+      <div class="row wrap"><button type="button" id="genReset" class="small">清除所有生成參數</button></div>
+
+      <h4>字幕 <small>（SRT，逐句對照 TTS 文字）</small></h4>
+      <label>字幕
+        <select id="srt">
+          <option value="off">不產生</option>
+          <option value="estimate">估算（單次請求；依字數與停頓偵測對齊）</option>
+          <option value="exact">逐句合成（時間軸精準；請求次數較多）</option>
+        </select></label>
+      <p id="srtHint" class="hint"></p>
+      <div class="grid">
+        <label>每條字幕最多字數（0＝自動）<input id="srt_max_chars" type="number" min="0" max="200" step="2" inputmode="numeric"></label>
+        <label>逐句模式：短於此字數的句子併入前一句<input id="srt_min_chars" type="number" min="0" max="30" inputmode="numeric"></label>
+      </div>
+      <label class="chk multi-only"><input type="checkbox" id="srt_speaker"> 多人對話：字幕前綴講者名稱</label>
+
       <label class="chk"><input type="checkbox" id="stream"> 顯示即時進度（使用官方串流；失敗時會自動改用一般模式）</label>
       <div class="grid">
         <label>試聽內容

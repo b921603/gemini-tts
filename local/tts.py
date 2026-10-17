@@ -315,6 +315,9 @@ CONSENT_PHRASES = [
 DEFAULTS = {
     "model": "auto",                # auto = 自動選用目前最新的語音(TTS)模型;也可填具體模型 ID
     "models_show_all": False,
+    # 生成參數 (generation_config):留空 = 使用模型預設。官方 Interactions API 沒有 top_k。
+    "gen_temperature": "", "gen_top_p": "", "gen_seed": "", "gen_seed_auto": False, "gen_max_tokens": "", "gen_extra": "",
+    "srt": "off",                   # 字幕 (SRT) 目前只有圖形介面/網頁版支援;設置檔共用,命令列版會保留這些值
     "mode": "single",              # single / multi
     "voice": "Kore",
     "style": "",
@@ -656,6 +659,67 @@ def save_lib(items: list[dict]) -> None:
         print(f"[!] 無法儲存金鑰庫: {e}")
 
 
+def build_gen_params(cfg: dict, disabled: set | None = None) -> tuple[dict, list[str]]:
+    """檢查並整理生成參數 (與網頁版 core.js 的 buildGenParams 規則一致)。回傳 (params, errors)"""
+    disabled = disabled or set()
+    params: dict = {}
+    errors: list[str] = []
+
+    def num(v):
+        return None if v in ("", None) else float(v)
+
+    def put(key, raw, ok, msg, conv=float):
+        try:
+            n = num(raw)
+        except (TypeError, ValueError):
+            errors.append(msg)
+            return
+        if n is None:
+            return
+        if not ok(n):
+            errors.append(msg)
+            return
+        if key not in disabled:
+            params[key] = conv(n)
+    put("temperature", cfg.get("gen_temperature"), lambda n: 0 <= n <= 2, "temperature 必須在 0–2 之間")
+    put("top_p", cfg.get("gen_top_p"), lambda n: 0 <= n <= 1, "top_p 必須在 0–1 之間")
+    put("max_output_tokens", cfg.get("gen_max_tokens"), lambda n: n == int(n) and n >= 1, "max_output_tokens 必須是 ≥ 1 的整數", int)
+    seed = None
+    try:
+        sraw = num(cfg.get("gen_seed"))
+    except (TypeError, ValueError):
+        sraw = float("nan")
+    if sraw is not None:
+        if sraw != sraw or sraw != int(sraw) or not (0 <= sraw <= 2147483647):
+            errors.append("seed 必須是 0–2147483647 的整數")
+        else:
+            seed = int(sraw)
+    elif cfg.get("gen_seed_auto"):
+        import random
+        seed = random.randint(0, 2147483647)
+    if seed is not None and "seed" not in disabled:
+        params["seed"] = seed
+    extra = str(cfg.get("gen_extra") or "").strip()
+    if extra:
+        try:
+            o = json.loads(extra)
+            if not isinstance(o, dict):
+                errors.append('額外參數必須是 JSON 物件,例如 {"stop_sequences": ["END"]}')
+            else:
+                for k, v in o.items():
+                    if k == "speech_config":
+                        errors.append("speech_config 由程式管理,不能放在額外參數")
+                    elif k not in disabled:
+                        params[k] = v
+        except Exception as e:
+            errors.append(f"額外參數不是有效的 JSON: {e}")
+    return params, errors
+
+
+_GEN: dict = {}            # 本次執行使用的生成參數 (main 設定)
+_GEN_DISABLED: set = set()  # 被模型拒絕而停用的參數
+
+
 def clone_model(cfg: dict) -> str:
     m = resolve_model(cfg["model"], normalize_model_list(_MODELS_CACHE or [], cfg.get("models_show_all", False)))
     return m if is_tts_model(m) else (pick_auto_model(normalize_model_list(_MODELS_CACHE or [])) or FALLBACK_TTS_MODELS[0])
@@ -715,7 +779,7 @@ def play_bytes(wav: bytes) -> None:
         print(f"  (已存到 {p},請自行播放)")
 
 
-def record_mic(max_sec: int) -> bytes:
+def record_mic(max_sec: int, countdown: int = 0) -> bytes:
     try:
         import sounddevice as sd
     except ImportError:
@@ -726,6 +790,9 @@ def record_mic(max_sec: int) -> bytes:
         frames.append(bytes(indata))
 
     input("  準備好後按 Enter 開始錄音 …")
+    for i in range(countdown, 0, -1):       # 倒數,讓你有時間準備開口
+        print(f"  {i} …", flush=True)
+        time.sleep(1)
     with sd.RawInputStream(samplerate=CLONE_RATE, channels=1, dtype="int16", callback=cb):
         print(f"  ● 錄音中 (最長 {max_sec} 秒) … 完成後再按 Enter 停止")
         ev = threading.Event()
@@ -770,6 +837,94 @@ def collect_clip(label: str, cfg: dict, min_sec: float, max_sec: float, trim_to:
             play_bytes(wav)
         if ask_yes_no("  接受這段音訊?", True):
             return wav
+
+
+# 參考音訊的朗讀文字 (任何自然的說話都可以;提供文字讓你「照著唸」就好)。沒有列出的語言請自由朗讀 10–30 秒。
+REFERENCE_PASSAGES = {
+    "zh": "今天的天氣很好，我打算和家人一起去公園散步。路上有許多人在運動，也有小朋友在草地上玩耍。我們買了一杯熱茶，坐在長椅上，慢慢欣賞傍晚的風景。生活不需要太複雜，能夠平靜地度過每一天，就是一件很幸福的事情。",
+    "en": "The weather is lovely today, so I decided to take a walk in the park with my family. People were jogging along the path, and children were playing on the grass. We bought some hot tea and sat on a bench to watch the evening light. Life does not have to be complicated; spending a quiet day together is already a happy thing.",
+    "ja": "今日はとても天気が良いので、家族と一緒に公園を散歩することにしました。道ではたくさんの人が運動していて、子どもたちは芝生の上で遊んでいます。温かいお茶を買って、ベンチに座り、夕方の景色をゆっくり眺めました。毎日を穏やかに過ごせることは、とても幸せなことだと思います。",
+    "ko": "오늘은 날씨가 아주 좋아서 가족과 함께 공원에서 산책하기로 했습니다. 길에는 운동하는 사람들이 많았고, 아이들은 잔디밭에서 뛰어놀고 있었습니다. 따뜻한 차를 한 잔 사서 벤치에 앉아 저녁 풍경을 천천히 바라보았습니다. 하루를 평온하게 보낼 수 있다는 것만으로도 참 행복한 일입니다.",
+    "fr": "Il fait très beau aujourd'hui, alors j'ai décidé de me promener dans le parc avec ma famille. Beaucoup de gens faisaient du sport, et les enfants jouaient sur l'herbe. Nous avons acheté un thé chaud et nous nous sommes assis sur un banc pour regarder la lumière du soir. La vie n'a pas besoin d'être compliquée ; passer une journée tranquille ensemble est déjà un bonheur.",
+    "de": "Heute ist das Wetter wunderschön, deshalb habe ich beschlossen, mit meiner Familie im Park spazieren zu gehen. Viele Menschen trieben Sport, und die Kinder spielten auf der Wiese. Wir kauften einen heißen Tee und setzten uns auf eine Bank, um das Abendlicht zu betrachten. Das Leben muss nicht kompliziert sein; ein ruhiger gemeinsamer Tag ist schon ein Glück.",
+    "es": "Hoy hace muy buen tiempo, así que decidí dar un paseo por el parque con mi familia. Había mucha gente haciendo ejercicio y los niños jugaban en el césped. Compramos un té caliente y nos sentamos en un banco a mirar la luz de la tarde. La vida no tiene que ser complicada; pasar un día tranquilo juntos ya es motivo de felicidad.",
+    "pt": "Hoje o tempo está ótimo, então decidi passear no parque com a minha família. Havia muita gente se exercitando e as crianças brincavam na grama. Compramos um chá quente e nos sentamos num banco para ver a luz do fim da tarde. A vida não precisa ser complicada; passar um dia tranquilo juntos já é uma felicidade.",
+    "it": "Oggi il tempo è bellissimo, così ho deciso di fare una passeggiata nel parco con la mia famiglia. Molte persone facevano sport e i bambini giocavano sull'erba. Abbiamo comprato un tè caldo e ci siamo seduti su una panchina a guardare la luce della sera. La vita non deve essere complicata; trascorrere insieme una giornata tranquilla è già una felicità.",
+    "ru": "Сегодня прекрасная погода, поэтому я решил прогуляться по парку вместе с семьёй. Многие люди занимались спортом, а дети играли на траве. Мы купили горячий чай и сели на скамейку, чтобы полюбоваться вечерним светом. Жизнь не должна быть сложной; спокойно провести день вместе — уже счастье.",
+    "id": "Hari ini cuacanya sangat bagus, jadi saya memutuskan berjalan-jalan di taman bersama keluarga. Banyak orang yang sedang berolahraga, dan anak-anak bermain di atas rumput. Kami membeli teh hangat lalu duduk di bangku untuk menikmati cahaya senja. Hidup tidak harus rumit; menghabiskan hari yang tenang bersama sudah merupakan kebahagiaan.",
+    "vi": "Hôm nay thời tiết rất đẹp, nên tôi quyết định đi dạo trong công viên cùng gia đình. Có nhiều người đang tập thể dục, còn trẻ em chơi đùa trên bãi cỏ. Chúng tôi mua một ly trà nóng và ngồi trên ghế đá ngắm ánh chiều tà. Cuộc sống không cần phải phức tạp; được cùng nhau trải qua một ngày yên bình đã là hạnh phúc.",
+    "tr": "Bugün hava çok güzel, bu yüzden ailemle birlikte parkta yürüyüş yapmaya karar verdim. Birçok insan spor yapıyordu, çocuklar da çimenlerde oynuyordu. Sıcak bir çay alıp bir bankta oturduk ve akşam ışığını izledik. Hayatın karmaşık olması gerekmez; birlikte sakin bir gün geçirmek zaten bir mutluluktur.",
+    "nl": "Het weer is vandaag prachtig, dus ik besloot met mijn gezin een wandeling in het park te maken. Veel mensen waren aan het sporten en de kinderen speelden op het gras. We kochten een warme thee en gingen op een bankje zitten om naar het avondlicht te kijken. Het leven hoeft niet ingewikkeld te zijn; samen een rustige dag doorbrengen is al een geluk.",
+    "pl": "Dziś jest piękna pogoda, więc postanowiłem pójść z rodziną na spacer do parku. Wiele osób uprawiało sport, a dzieci bawiły się na trawie. Kupiliśmy gorącą herbatę i usiedliśmy na ławce, żeby patrzeć na wieczorne światło. Życie nie musi być skomplikowane; spokojny dzień spędzony razem to już szczęście.",
+    "hi": "आज मौसम बहुत अच्छा है, इसलिए मैंने परिवार के साथ पार्क में टहलने का फैसला किया। बहुत से लोग व्यायाम कर रहे थे और बच्चे घास पर खेल रहे थे। हमने गरम चाय ली और बेंच पर बैठकर शाम की रोशनी देखी। जीवन को जटिल होने की ज़रूरत नहीं है; साथ में एक शांत दिन बिताना ही खुशी है।",
+    "th": "วันนี้อากาศดีมาก ฉันจึงตัดสินใจไปเดินเล่นในสวนสาธารณะกับครอบครัว มีคนจำนวนมากกำลังออกกำลังกาย และเด็ก ๆ กำลังเล่นอยู่บนสนามหญ้า เราซื้อชาร้อนแล้วนั่งบนม้านั่งชมแสงยามเย็น ชีวิตไม่จำเป็นต้องซับซ้อน การได้ใช้วันที่สงบสุขร่วมกันก็เป็นความสุขแล้ว",
+}
+
+
+def pcm_level(wav: bytes) -> tuple[float, float]:
+    """(峰值, RMS),皆為 0–1 的比例。用於提醒音量太小或爆音。"""
+    import array
+    with wave.open(io.BytesIO(wav), "rb") as w:
+        a = array.array("h")
+        a.frombytes(w.readframes(w.getnframes()))
+    if not a:
+        return 0.0, 0.0
+    peak = max(max(a), -min(a)) / 32768
+    rms = (sum(v * v for v in a) / len(a)) ** 0.5 / 32768
+    return peak, rms
+
+
+def _record_clip(label: str, guide: str, min_sec: float, max_sec: int) -> bytes:
+    while True:
+        print(f"\n{label}\n{guide}")
+        wav = record_mic(max_sec, countdown=3)
+        sec = wav_info(wav)[3]
+        peak, rms = pcm_level(wav)
+        problems = []
+        if sec < min_sec:
+            problems.append(f"太短 (至少需要 {min_sec:g} 秒)")
+        if peak < 0.05:
+            problems.append("音量太小 (請靠近麥克風,或調高 Windows 的麥克風輸入音量)")
+        if peak > 0.99:
+            problems.append("爆音 (請離麥克風遠一點,或調低輸入音量)")
+        print(f"  錄到 {sec:.1f} 秒,峰值 {peak * 100:.0f}%,平均音量 {rms * 100:.1f}%" + ("  ✓ 看起來不錯" if not problems else ""))
+        for pr in problems:
+            print(f"  [!] {pr}")
+        while True:
+            k = ask_menu("這段錄音", [("y", "接受"), ("p", "先聽聽看"), ("r", "重錄")], "r" if problems else "y")
+            if k == "p":
+                play_bytes(wav)
+                continue
+            break
+        if k == "y":
+            return wav
+
+
+def guided_clone_recording(save_dir: Path | None = None, lang: str | None = None) -> tuple[bytes, bytes, str]:
+    """引導式錄音:選語言 → 照著唸 → 自動轉成 24 kHz 單聲道 16-bit WAV (並存檔供下次重用)。回傳 (參考音訊, 同意錄音, 語言代碼)"""
+    entry = next((e for e in CONSENT_PHRASES if e[0] == lang), None) if lang else None
+    if entry is None:
+        entry = pick_consent()
+    code, name, statement = entry
+    prefix = code.split("-")[0].lower()
+    passage = REFERENCE_PASSAGES.get(prefix)
+    print(f"\n語言: {name} ({code})")
+    print("提示: 兩段請在「同一個安靜的地方、用同一支麥克風、同一個人」錄製;避免背景音樂與他人說話聲。")
+    guide1 = ("請「照著唸」下面這段 (10–30 秒,語速自然;唸完按 Enter 停止):\n\n    " + passage) if passage else \
+        "請用該語言自然地朗讀任何一段文字 10–30 秒 (例如書籍、新聞或自我介紹;唸完按 Enter 停止)"
+    src = _record_clip("[1/2] 參考音訊", guide1, CLONE_MIN_SEC, CLONE_MAX_SEC + 5)
+    src, trimmed = trim_wav(src, CLONE_MAX_SEC)
+    if trimmed:
+        print(f"  (超過 {CLONE_MAX_SEC} 秒,已自動取前 {CLONE_MAX_SEC} 秒)")
+    note = "\n  (官方沒有繁體中文版聲明:請以國語逐字朗讀這句簡體中文原文)" if code == "zh-CN" else ""
+    consent = _record_clip("[2/2] 同意錄音", f"請「逐字」朗讀這句聲明 (必須是原文,唸完按 Enter 停止):\n\n    {statement}{note}", 1, 60)
+    if save_dir:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        (save_dir / f"ref_{code}.wav").write_bytes(src)
+        (save_dir / f"consent_{code}.wav").write_bytes(consent)
+        (save_dir / "last_lang.txt").write_text(code, encoding="utf-8")
+        print(f"\n已存到 {save_dir} (下次可直接重用,不必重錄)")
+    return src, consent, code
 
 
 def pick_consent():
@@ -1040,6 +1195,13 @@ def configure_general(cfg: dict, client=None) -> None:
             cfg["force_per_turn"] = ask_yes_no("強制逐段合成再拼接 (可穩定各段聲音,但較慢)?",
                                                cfg["force_per_turn"])
             cfg["gap_ms"] = ask_number("逐段合成時,段與段之間的靜音 (毫秒)", cfg["gap_ms"], int, 0, 5000)
+        print("\n進階生成參數 (留空 = 使用模型預設;官方 Interactions API 沒有 top_k)")
+        cfg["gen_temperature"] = ask("  temperature (0–2)", str(cfg["gen_temperature"]))
+        cfg["gen_top_p"] = ask("  top_p (0–1)", str(cfg["gen_top_p"]))
+        cfg["gen_seed"] = ask("  seed (整數)", str(cfg["gen_seed"]))
+        cfg["gen_seed_auto"] = ask_yes_no("  每次自動指定隨機種子並印出 (方便重現喜歡的版本)?", bool(cfg["gen_seed_auto"]))
+        cfg["gen_max_tokens"] = ask("  max_output_tokens (設太小會截斷語音,不建議)", str(cfg["gen_max_tokens"]))
+        cfg["gen_extra"] = ask("  額外 generation_config JSON (例如 {\"stop_sequences\": [\"END\"]})", str(cfg["gen_extra"]))
         cfg["out_dir"] = ask("輸出資料夾 (相對路徑以本腳本所在位置為基準)", cfg["out_dir"])
         cfg["autoplay"] = ask_yes_no("生成後自動播放?", cfg["autoplay"])
         cfg["retries"] = ask_number("失敗自動重試次數", cfg["retries"], int, 0, 10)
@@ -1235,13 +1397,24 @@ def with_retry(fn, retries: int):
 
 def call_tts(client, model, input_, speech_config, response_format, retries) -> bytes:
     def _do():
-        it = client.interactions.create(
-            model=model,
-            input=input_,
-            response_format=response_format,
-            generation_config={"speech_config": speech_config},
-        )
-        return extract_audio(it)
+        while True:
+            gen = {k: v for k, v in _GEN.items() if k not in _GEN_DISABLED}
+            try:
+                it = client.interactions.create(
+                    model=model,
+                    input=input_,
+                    response_format=response_format,
+                    generation_config={**gen, "speech_config": speech_config},
+                )
+                return extract_audio(it)
+            except Exception as e:      # 模型拒絕某個參數 → 停用它後重試 (被拒絕的請求不會計費)
+                msg = str(e)
+                bad = [k for k in gen if re.search(rf"\b{re.escape(k)}\b", msg)]
+                if bad and ("400" in msg or "INVALID_ARGUMENT" in msg.upper()):
+                    _GEN_DISABLED.update(bad)
+                    print(f"  [!] 模型不接受參數 {', '.join(bad)},已略過後重試。")
+                    continue
+                raise
     return with_retry(_do, retries)
 
 
@@ -1539,6 +1712,15 @@ def main() -> None:
         print(f"[i] 文本已自動分成 {len(segments)} 段,將逐段合成後拼接。")
 
     run_cfg = dict(cfg)  # 本次實際使用 (ffmpeg 不可用時會降級,不寫回設置檔)
+    gp, gerr = build_gen_params(cfg)
+    if gerr:
+        raise SystemExit("[X] 生成參數有誤: " + "；".join(gerr))
+    _GEN.clear()
+    _GEN.update(gp)
+    if gp:
+        print(f"[i] 生成參數: {json.dumps(gp, ensure_ascii=False)}" + (" (種子為自動指定,填入 seed 即可重現)" if cfg.get("gen_seed_auto") and not str(cfg.get("gen_seed")).strip() else ""))
+    if cfg.get("srt", "off") != "off":
+        print("[i] 命令列版目前不產生字幕 (SRT);請改用圖形介面 (python tts.py --gui) 或網頁版。")
     if cfg["model"] in ("", "auto"):
         run_cfg["model"] = resolve_model("auto", discover_models(client, cfg.get("models_show_all", False)))
         print(f"[i] 自動選用模型: {run_cfg['model']}")

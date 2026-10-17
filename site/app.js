@@ -71,6 +71,8 @@ const BIND = [
   ['speed', 'float'], ['keep_wav', 'bool'], ['autoplay', 'bool'], ['retries', 'int'],
   ['conversational', 'bool'], ['force_per_turn', 'bool'], ['gap_ms', 'int'], ['max_chars', 'int'], ['style', 'text'],
   ['batch', 'bool'], ['auto_save', 'bool'], ['out_dir', 'text'], ['ffmpeg_path', 'text'], ['gui_browser', 'text'], ['models_show_all', 'bool'], ['stream', 'bool'], ['preview_mode', 'text'], ['preview_chars', 'int'],
+  ['gen_temperature', 'text'], ['gen_top_p', 'text'], ['gen_seed', 'text'], ['gen_max_tokens', 'text'], ['gen_seed_auto', 'bool'], ['gen_extra', 'text'],
+  ['srt', 'text'], ['srt_speaker', 'bool'], ['srt_max_chars', 'int'], ['srt_min_chars', 'int'],
 ];
 
 function readField(k, t) {
@@ -208,7 +210,22 @@ function updateVisibility() {
     note.hidden = !needFf;
     if (needFf) note.textContent = '此設置需要 ffmpeg.wasm：首次使用會下載約 31 MB（之後由瀏覽器快取），轉檔在你的手機上本機執行。';
   }
+  renderGenPreview();
+  const hints = {
+    off: '', estimate: '單次請求產生整份音訊，再依字數權重估算每句位置，並吸附到音訊中偵測到的停頓處。一般誤差不大，但不保證逐字精準。',
+    exact: '每句各自合成：每句的音訊長度已知，所以時間軸精準。代價：請求次數≈句數、句與句之間的語調連貫性可能略差、會套用「段間靜音」設定。',
+  };
+  $('#srtHint').textContent = hints[cfg.srt] || '';
   updateCount();
+}
+
+function renderGenPreview() {   // 顯示「實際會送出」的 generation_config,輸入有誤時即時提示
+  const el = $('#genPreview');
+  const g = C.buildGenParams({ ...cfg, gen_seed_auto: false });
+  el.classList.toggle('bad', g.errors.length > 0);
+  if (g.errors.length) { el.textContent = '⚠ ' + g.errors.join('；'); return; }
+  const shown = { ...g.params };
+  el.textContent = `generation_config: ${JSON.stringify({ ...shown, speech_config: '…(由人聲設定產生)' })}${cfg.gen_seed_auto && g.params.seed === undefined ? '，seed: 每次自動指定' : ''}`;
 }
 
 function renderSpeakerRows() {
@@ -636,8 +653,15 @@ async function generate() {
   const text = $('#text').value;
   const err = validate(text);
   if (err) { setStatus(err, 'error'); return; }
+  const gerr = C.buildGenParams(cfg).errors;
+  if (gerr.length) { setStatus(`生成參數有誤：${gerr.join('；')}`, 'error'); return; }
   const chunks = cfg.batch ? text.split(/^[ \t]*---[ \t]*$/m).map((x) => x.trim()).filter(Boolean) : [text];
   if (!chunks.length) { setStatus('請輸入文本', 'error'); return; }
+  if (cfg.srt === 'exact') {
+    let n = 0;
+    try { n = chunks.reduce((sum, c) => sum + C.buildSegmentsExact(cfg, c).length, 0); } catch { /* 文本格式錯誤會在生成時回報 */ }
+    if (n > 30 && !confirm(`逐句字幕模式會把文本分成約 ${n} 句，各自送出一次請求（用量與等待時間都會增加）。要繼續嗎？\n（也可改用「估算」模式，只送出一次請求）`)) return;
+  }
 
   ctl = new AbortController();
   setBusy(true);
@@ -720,6 +744,12 @@ function addResults(outputs, stem, runCfg, autoplayOk = true, info = {}) {
       audio.preload = 'metadata';
       audio.src = url;
       card.appendChild(audio);
+    } else if (o.fmt === 'srt') {
+      const text = new TextDecoder().decode(o.bytes);
+      const pre = document.createElement('pre');
+      pre.className = 'srtprev';
+      pre.textContent = text.split('\n').slice(0, 14).join('\n') + (text.split('\n').length > 14 ? '\n…' : '');
+      card.appendChild(pre);
     } else {
       const p = document.createElement('p');
       p.className = 'hint';
@@ -745,6 +775,7 @@ function addResults(outputs, stem, runCfg, autoplayOk = true, info = {}) {
       });
       row.appendChild(sh);
     }
+    if (o.fmt === 'srt') row.appendChild(mkBtn('複製字幕', async (e) => { try { await navigator.clipboard.writeText(new TextDecoder().decode(o.bytes)); e.currentTarget.textContent = '已複製 ✓'; } catch { setStatus('無法複製，請改用下載', 'warn'); } }, 'small'));
     const rm = document.createElement('button');
     rm.type = 'button';
     rm.className = 'small danger';
@@ -1002,7 +1033,8 @@ async function previewVoice(voice, { lang = '', btn = null } = {}) {
   try {
     const model = cloneModel();
     const smp = previewSample(lang);
-    const key = [model, voice, smp.style, smp.text].join('\u0001');
+    const gen = C.buildGenParams({ ...cfg, gen_seed_auto: false }).params;
+    const key = [model, voice, smp.style, smp.text, JSON.stringify(gen)].join('\u0001');
     setStage('檢查快取…');
     let wav = await pvCache.get(key);
     let source = wav ? '快取（不消耗額度）' : '';
@@ -1018,7 +1050,7 @@ async function previewVoice(voice, { lang = '', btn = null } = {}) {
     if (!wav) {
       setStage('① 送出請求…');
       const r = await C.synthesizeOnce({
-        model, voice, style: smp.style, text: smp.text, signal: ctl.signal,
+        model, voice, style: smp.style, text: smp.text, signal: ctl.signal, gen,
         callApi: (b) => apiFetch('/interactions', { method: 'POST', body: b, signal: ctl.signal }),
         streamApi: cfg.stream !== false ? streamApi : null,
         onProgress: (p) => {
@@ -1359,6 +1391,7 @@ async function init() {
     renderModelSelect();
   });
   $('#modelRefresh').addEventListener('click', () => refreshModels(true));
+  $('#genReset').addEventListener('click', () => { for (const k of ['gen_temperature', 'gen_top_p', 'gen_seed', 'gen_max_tokens', 'gen_extra']) $('#' + k).value = ''; $('#gen_seed_auto').checked = false; onFormChange(); });
   $('#clearPreviewCache').addEventListener('click', async () => { await pvCache.clear(); setStatus('已清除試聽快取', 'ok'); });
   $('#models_show_all').addEventListener('change', () => { onFormChange(); renderModelSelect(); });
   $('#modelCustom').addEventListener('input', onFormChange);

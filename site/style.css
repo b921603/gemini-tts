@@ -179,3 +179,8 @@ button.busy::after { content: ""; position: absolute; width: 14px; height: 14px;
 .pvbar audio { width: 100%; margin-top: 6px; height: 36px; }
 .pvbar.err .pvtext { color: var(--danger); }
 .pvhint { margin: 4px 0 8px; }
+
+.genpreview { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; overflow-wrap: anywhere; }
+.genpreview.bad { color: var(--danger); border-color: var(--danger); }
+.srtprev { margin: 6px 0; max-height: 150px; font-size: .78rem; }
+textarea#gen_extra { min-height: 60px; font-family: ui-monospace, Consolas, monospace; font-size: .85rem; }

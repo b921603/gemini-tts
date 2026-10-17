@@ -9,7 +9,8 @@ Gemini TTS 實機自我檢測 (只需 Python 標準庫;克隆測試的檔案轉�
   python selftest.py                              基本檢測 (模型清單、人聲、一般/串流合成、多人、語氣)
   python selftest.py --ref 我的聲音.wav --consent 同意.wav --lang zh-CN
                                                   另外測試「音色克隆」(預設用 voicekey_,不在你的專案留下任何東西)
-  python selftest.py --record --lang zh-CN        改用麥克風錄製參考音訊與同意錄音 (需 pip install sounddevice)
+  python selftest.py --record                     引導式錄音:先用選單選語言,再「照著唸」即可 (自動轉成正確格式並存檔,需 pip install sounddevice)
+  python selftest.py --reuse-audio                重用上次錄好的音訊 (local\\selftest_audio),不必重錄
   python selftest.py --ref a.wav --consent b.wav --store
                                                   再測試「儲存在專案」的克隆流程 (建立 → 取得 → 列出 → 合成 → 刪除,最後會自動清理)
 選項: --model ID  --voice Kore  --text "..."  --formats (測試 mulaw/取樣率)  --report 路徑
@@ -403,8 +404,40 @@ def t_multi(args) -> None:
            "被接受" if r["status"] == 200 else f"被拒絕 (本專案會自動退回一般多人模式): {err_text(r)}")
 
 
+def t_params(args) -> None:
+    section("7. 生成參數 (generation_config) — 哪些參數被接受")
+    base = synth_body(CTX["model"], args.voice, "好。")
+    cases = [("temperature=0.5", {"temperature": 0.5}), ("top_p=0.9", {"top_p": 0.9}), ("seed=7", {"seed": 7}),
+             ("max_output_tokens=2000", {"max_output_tokens": 2000}), ("top_k=40 (Interactions API 官方沒有)", {"top_k": 40}),
+             ("stop_sequences=['END']", {"stop_sequences": ["END"]})]
+    for label, extra in cases:
+        body = json.loads(json.dumps(base))
+        body["generation_config"].update(extra)
+        r = api("POST", "/interactions", body)
+        ok = r["status"] == 200
+        st = "PASS" if ok else ("INFO" if "top_k" in label else "FAIL")
+        result(f"參數 {label}", st, "被接受" if ok else err_text(r))
+    out("   種子重現性 (同樣的文字與種子,結果是否一致):")
+    audio = {}
+    for tag, seed in (("A", 123), ("B", 123), ("C", 456)):
+        body = json.loads(json.dumps(synth_body(CTX["model"], args.voice, args.text)))
+        body["generation_config"]["seed"] = seed
+        r = api("POST", "/interactions", body)
+        try:
+            audio[tag] = get_audio(r["json"])
+        except Exception:
+            audio[tag] = None
+    if all(audio.values()):
+        same_ab = audio["A"] == audio["B"]
+        out(f"   seed=123 兩次: {'位元組完全相同' if same_ab else ('長度相同但內容不同' if len(audio['A']) == len(audio['B']) else '長度與內容都不同')} "
+            f"({len(audio['A'])} / {len(audio['B'])} 位元組);seed=456: {len(audio['C'])} 位元組 ({'與 seed=123 不同' if audio['C'] != audio['A'] else '與 seed=123 相同'})")
+        result("種子重現性", "INFO", "完全重現" if same_ab else "不保證完全重現 (取決於模型)")
+    else:
+        result("種子重現性", "WARN", "請求失敗,無法比較")
+
+
 def t_formats(args) -> None:
-    section("7. 原生輸出格式 (mime_type / sample_rate)")
+    section("8. 原生輸出格式 (mime_type / sample_rate)")
     for label, rf in (("mulaw 8 kHz", {"type": "audio", "mime_type": "audio/mulaw", "sample_rate": 8000}),
                       ("wav 16 kHz", {"type": "audio", "mime_type": "audio/wav", "sample_rate": 16000}),
                       ("l16 (PCM)", {"type": "audio", "mime_type": "audio/l16"})):
@@ -419,15 +452,23 @@ def t_formats(args) -> None:
             result(f"格式 {label}", "FAIL", err_text(r))
 
 
+AUDIO_DIR = HERE / "selftest_audio"
+
+
 def prepare_clone_audio(args):
     cfg = dict(tts.DEFAULTS)
+    if args.reuse_audio:
+        last = (AUDIO_DIR / "last_lang.txt")
+        code = args.lang or (last.read_text(encoding="utf-8").strip() if last.exists() else "")
+        ref, cons = AUDIO_DIR / f"ref_{code}.wav", AUDIO_DIR / f"consent_{code}.wav"
+        if not (code and ref.exists() and cons.exists()):
+            raise RuntimeError(f"找不到上次錄好的音訊 ({AUDIO_DIR});請先用 --record 錄製一次")
+        args.lang = code
+        out(f"   重用上次錄好的音訊: {ref.name}、{cons.name}")
+        return ref.read_bytes(), cons.read_bytes()
     if args.record:
-        print("\n== 錄音 ==")
-        statement = next((t for c, _, t in tts.CONSENT_PHRASES if c == args.lang), None)
-        print(f"[1/2] 參考音訊:請自然說話 10–30 秒。")
-        src = tts.record_mic(30)
-        print(f"[2/2] 同意錄音:請逐字朗讀 ({args.lang}):\n    {statement}")
-        consent = tts.record_mic(60)
+        src, consent, code = tts.guided_clone_recording(AUDIO_DIR, args.lang)
+        args.lang = code
         return src, consent
     src, trimmed = tts.prepare_audio(Path(args.ref.strip('"')), cfg, tts.CLONE_MAX_SEC)
     consent, _ = tts.prepare_audio(Path(args.consent.strip('"')), cfg, 60)
@@ -448,14 +489,15 @@ def clone_body(model: str, name: str, store: bool, src: bytes, consent: bytes) -
 
 
 def t_clone(args) -> None:
-    section("8. 音色克隆 (Voice replication)")
-    statement = next((t for c, _, t in tts.CONSENT_PHRASES if c == args.lang), "(未知語言代碼)")
-    out(f"   同意聲明語言 {args.lang},同意錄音必須逐字朗讀:\n     {statement}")
+    section("9. 音色克隆 (Voice replication)")
     try:
         src, consent = prepare_clone_audio(args)
     except Exception as e:
         result("克隆: 準備音訊", "FAIL", f"{type(e).__name__}: {e}")
         return
+    args.lang = args.lang or "zh-CN"
+    statement = next((tx for c, _, tx in tts.CONSENT_PHRASES if c == args.lang), "(未知語言代碼)")
+    out(f"   同意聲明語言 {args.lang},同意錄音內容必須是:\n     {statement}")
     si, ci = tts.wav_info(src), tts.wav_info(consent)
     out(f"   參考音訊: {si[3]:.1f} 秒,{si[1]} Hz,{si[0]} 聲道,{si[2]}-bit;同意錄音: {ci[3]:.1f} 秒,{ci[1]} Hz")
     if si[3] < tts.CLONE_MIN_SEC:
@@ -515,7 +557,9 @@ def main() -> int:
     ap.add_argument("--formats", action="store_true", help="另外測試 mulaw / 取樣率")
     ap.add_argument("--ref", help="克隆: 參考音訊檔 (10–30 秒)")
     ap.add_argument("--consent", help="克隆: 同意錄音檔 (朗讀聲明原文)")
-    ap.add_argument("--lang", default="zh-CN", help="同意聲明語言代碼 (預設 zh-CN)")
+    ap.add_argument("--lang", default=None, help="同意聲明語言代碼 (例如 zh-CN);--record 時省略會跳出語言選單")
+    ap.add_argument("--reuse-audio", action="store_true", help="克隆: 重用上次錄好的音訊")
+    ap.add_argument("--skip-params", action="store_true", help="略過生成參數檢測")
     ap.add_argument("--record", action="store_true", help="克隆: 用麥克風錄音")
     ap.add_argument("--store", action="store_true", help="克隆: 另外測試儲存在專案的流程 (結束後自動刪除)")
     ap.add_argument("--report", default=str(HERE / "selftest_report.txt"))
@@ -537,16 +581,30 @@ def main() -> int:
             fn(args)
         except Exception as e:     # 單項失敗不影響其他項目
             result(fn.__name__, "FAIL", f"程式例外 {type(e).__name__}: {e}")
+    if not args.skip_params:
+        try:
+            t_params(args)
+        except Exception as e:
+            result("t_params", "FAIL", f"程式例外 {type(e).__name__}: {e}")
     if args.formats:
         t_formats(args)
-    if args.record or (args.ref and args.consent):
+    if not (args.record or args.reuse_audio or (args.ref and args.consent)) and sys.stdin.isatty():
+        # 互動式 (例如雙擊 .bat):詢問要不要測試克隆
+        print("\n音色克隆測試:")
+        print("  1) 跳過")
+        print("  2) 引導式錄音 (選語言 → 照著唸;需要麥克風與 pip install sounddevice)  [推薦]")
+        if (AUDIO_DIR / "last_lang.txt").exists():
+            print("  3) 重用上次錄好的音訊")
+        pick = input("請選擇 [1]: ").strip() or "1"
+        args.record, args.reuse_audio = pick == "2", pick == "3"
+    if args.record or args.reuse_audio or (args.ref and args.consent):
         try:
             t_clone(args)
         except Exception as e:
             result("克隆", "FAIL", f"程式例外 {type(e).__name__}: {e}")
     else:
-        section("8. 音色克隆")
-        result("音色克隆", "SKIP", "未提供 --ref/--consent 或 --record (加上就會測試;預設用 voicekey_,不在你的專案留下東西)")
+        section("9. 音色克隆")
+        result("音色克隆", "SKIP", "未提供 --record / --ref+--consent / --reuse-audio (加上就會測試;預設用 voicekey_,不在你的專案留下東西)")
 
     section("總結")
     for n, s, m in RESULTS:

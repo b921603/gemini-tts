@@ -46,7 +46,7 @@ SETTINGS_FILE = HERE / "tts_settings.json"
 LIB_FILE = HERE / "tts_voices.json"
 KEY_FILE = HERE / ".gemini_key"
 DEFAULT_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".pcm", ".mulaw", ".alaw"}
+AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".pcm", ".mulaw", ".alaw", ".srt"}   # .srt = 字幕檔 (同一份輸出)
 MAX_BODY = 200 * 1024 * 1024
 VERSION = "1.0"
 
@@ -432,7 +432,7 @@ class Handler(BaseHTTPRequestHandler):
             if not f.is_file() or f.suffix.lower() not in AUDIO_EXTS:
                 return self._err(404, "找不到檔案")
             ctype = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".flac": "audio/flac", ".ogg": "audio/ogg",
-                     ".opus": "audio/ogg", ".m4a": "audio/mp4"}.get(f.suffix.lower(), "application/octet-stream")
+                     ".opus": "audio/ogg", ".m4a": "audio/mp4", ".srt": "text/plain; charset=utf-8"}.get(f.suffix.lower(), "application/octet-stream")
             return self._send(200, f.read_bytes(), ctype)
         if p == "open" and method == "POST":
             d = json.loads(self._body() or b"{}")

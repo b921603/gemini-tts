@@ -15,6 +15,8 @@ Built on Google's **Gemini text-to-speech (TTS)** API · **always uses the newes
 ## Features
 
 - **Newest model, automatically** — the app asks Google which models your account can use and picks the latest-generation TTS model by default, so a new model generation needs no update. You can also pin a version or type any model ID.
+- **Subtitles (SRT)** — optional, sentence by sentence against the TTS text. *Per-sentence* mode synthesizes each sentence separately so timings are exact; *estimate* mode makes one request and aligns by text weight snapped to pauses detected in the audio (an estimate).
+- **Generation parameters** — `temperature`, `top_p`, `seed`, `max_output_tokens`, plus any extra `generation_config` JSON (the Interactions API has no top_k); if the model rejects a parameter it is dropped automatically and the request retried.
 - **Visible progress** — four stages (sent → Google processing → receiving audio → finishing) plus, via the official streaming mode, the seconds of audio generated so far and an estimated time left (the API gives no percentage, so the estimate is approximate); falls back to normal mode if streaming is unavailable.
 - **Quota-friendly previews** — ▶ preview synthesizes **one short sample sentence** (about 2–3 s of audio) and caches it on your device, so replays cost nothing; voices made with Voice design use the official sample audio.
 - **Recent generations** — the web app keeps your audio in your browser (IndexedDB, never uploaded; up to 50 items / 200 MB) so it survives reloads, with play / download / share / delete; the desktop app saves to its output folder.

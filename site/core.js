@@ -114,6 +114,16 @@ export const DEFAULTS = {
   stream: true,                 // 使用串流取得即時進度 (官方支援 stream:true;失敗會自動退回一般模式)
   preview_mode: 'sample',       // 試聽內容: sample = 一句短範例 (省額度,預設) / mytext = 我的文本開頭
   preview_chars: 30,            // 試聽用我的文本開頭時的字數上限
+  gen_temperature: '',          // 生成參數 (generation_config):留空 = 使用模型預設
+  gen_top_p: '',
+  gen_seed: '',
+  gen_seed_auto: false,         // 每次自動指定隨機種子並記錄下來 (方便固定喜歡的版本)
+  gen_max_tokens: '',
+  gen_extra: '',                // 進階:額外的 generation_config JSON (官方日後新增的參數可直接填入)
+  srt: 'off',                   // 字幕 (SRT): off / estimate (單次請求,依字數與停頓估算) / exact (逐句合成,時間軸精準)
+  srt_speaker: true,            // 多人對話字幕前綴「講者: 」
+  srt_min_chars: 4,             // 逐句模式:少於這個字數的短句併入前一句 (避免過短的獨立請求;併入的部分時間軸為估算)
+  srt_max_chars: 0,             // 每條字幕最多字數 (0 = 自動:中日韓約 28 字、其他約 56 字元)
   batch: false,                 // 批次模式: 文本以單獨一行 --- 分隔,每段各產生一個檔案
   auto_save: true,              // (本機版) 生成後自動存進輸出資料夾
   out_dir: 'output',            // (本機版) 輸出資料夾
@@ -209,6 +219,17 @@ export function buildSegments(cfg, text) {
     style: t.style || cfg.speaker_styles[t.speaker] || '',
     text: t.text,
   }));
+}
+
+/** 字幕「精準」模式:把文本拆成「句」,每句各自合成 (每句音訊長度已知 → 時間軸精準) */
+export function buildSegmentsExact(cfg, text) {
+  const base = buildSegments({ ...cfg, max_chars: 0 }, text);
+  const out = [];
+  for (const seg of base) {
+    const sentences = mergeShort(splitSentences(seg.text), cfg.srt_min_chars ?? 4);
+    for (const sen of (sentences.length ? sentences : [seg.text])) out.push({ ...seg, text: sen });
+  }
+  return out;
 }
 
 export function makeInput(segments, multi) {
@@ -356,6 +377,222 @@ export async function withRetry(fn, retries, { onRetry, signal } = {}) {
 }
 
 // --------------------------------------------------------------------------- //
+// 生成參數 (generation_config)
+// Interactions API 官方支援: temperature、top_p、seed、max_output_tokens、stop_sequences… (沒有 top_k)。
+// --------------------------------------------------------------------------- //
+export const GEN_PARAM_HELP = {
+  temperature: '隨機程度。數字越高語氣變化越大、越不穩定;留空使用模型預設。',
+  top_p: '只從累積機率前 P 的候選中取樣 (0–1);留空使用預設。',
+  seed: '固定種子可讓相同輸入較容易得到相同結果 (是否完全一致取決於模型)。',
+  max_output_tokens: '限制輸出 token 上限。⚠ 設太小會讓語音被截斷。',
+};
+const num = (v) => (v === '' || v === null || v === undefined ? null : Number(v));
+
+/** 檢查並整理生成參數。回傳 {params, errors, seed};disabled 是被 API 拒絕而停用的欄位。 */
+export function buildGenParams(cfg, disabled = new Set()) {
+  const params = {};
+  const errors = [];
+  const put = (key, raw, check, msg, conv = Number) => {
+    const n = num(raw);
+    if (n === null) return;
+    if (!Number.isFinite(n) || !check(n)) { errors.push(msg); return; }
+    if (!disabled.has(key)) params[key] = conv(n);
+  };
+  put('temperature', cfg.gen_temperature, (n) => n >= 0 && n <= 2, 'temperature 必須在 0–2 之間');
+  put('top_p', cfg.gen_top_p, (n) => n >= 0 && n <= 1, 'top_p 必須在 0–1 之間');
+  put('max_output_tokens', cfg.gen_max_tokens, (n) => Number.isInteger(n) && n >= 1, 'max_output_tokens 必須是 ≥ 1 的整數');
+  let seed = null;
+  const sraw = num(cfg.gen_seed);
+  if (sraw !== null) {
+    if (!Number.isInteger(sraw) || sraw < 0 || sraw > 2147483647) errors.push('seed 必須是 0–2147483647 的整數');
+    else seed = sraw;
+  } else if (cfg.gen_seed_auto) seed = Math.floor(Math.random() * 2147483647);
+  if (seed !== null && !disabled.has('seed')) params.seed = seed;
+  const extra = String(cfg.gen_extra || '').trim();
+  if (extra) {
+    try {
+      const o = JSON.parse(extra);
+      if (!o || typeof o !== 'object' || Array.isArray(o)) errors.push('額外參數必須是 JSON 物件,例如 {"stop_sequences": ["END"]}');
+      else {
+        for (const [k, v] of Object.entries(o)) {
+          if (k === 'speech_config') errors.push('speech_config 由程式管理 (人聲請在介面選擇),不能放在額外參數');
+          else if (!disabled.has(k)) params[k] = v;
+        }
+      }
+    } catch (e) { errors.push(`額外參數不是有效的 JSON: ${e.message}`); }
+  }
+  return { params, errors, seed };
+}
+export const GEN_PARAM_NAMES = ['temperature', 'top_p', 'seed', 'max_output_tokens'];
+
+// --------------------------------------------------------------------------- //
+// 字幕 (SRT):依 TTS 文字逐句產生時間軸
+//   exact    = 每句各自合成 → 每句音訊長度已知,時間軸精準
+//   estimate = 單次請求 → 依字數權重估算句界,再「吸附」到音訊中偵測到的停頓處 (準確度有限,屬估算)
+// --------------------------------------------------------------------------- //
+const CJK = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/g;
+const ABBR = /(?:\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|No|Fig)\.|\b(?:e\.g|i\.e)\.|\b[A-Z]\.)$/;
+
+export const stripTags = (t) => String(t || '').replace(/<[^>]*>/g, ' ').replace(/[ \t]+/g, ' ').trim();
+
+/** 把文字切成「句」。標籤 (<short pause> 等) 保留在原文中以便計算停頓時間,顯示時才移除。 */
+export function splitSentences(raw) {
+  const out = [];
+  for (const line of String(raw || '').split(/\n+/)) {
+    const t = line.trim();
+    if (!t) continue;
+    let parts = t.split(/(?<=[。！？!?…；;][」』”’）)\]]*)(?![。！？!?…；;」』”’）)\]])\s*|(?<=\.)\s+(?=[A-Z0-9"“(「])/).map((x) => x.trim()).filter(Boolean);
+    const merged = [];
+    for (const p of parts) {
+      if (merged.length && ABBR.test(merged[merged.length - 1])) merged[merged.length - 1] += ' ' + p;   // Mr. / e.g. 等縮寫不當作句尾
+      else merged.push(p);
+    }
+    out.push(...merged);
+  }
+  return out;
+}
+/** 太長的句子在逗號處再切;limit 為字數上限 */
+export function wrapUnits(sentences, limit) {
+  const out = [];
+  for (const sen of sentences) {
+    const len = [...stripTags(sen)].length;
+    if (len <= limit) { out.push(sen); continue; }
+    const pieces = sen.split(/(?<=[，,、：:])\s*/).filter(Boolean);
+    let cur = '';
+    for (const pc of pieces) {
+      if (cur && [...stripTags(cur + pc)].length > limit) { out.push(cur); cur = pc; } else cur += pc;
+    }
+    if (cur) out.push(cur);
+  }
+  return out.flatMap((u) => {          // 仍超長的硬切
+    const chars = [...u];
+    if (chars.length <= limit * 1.6) return [u];
+    const r = [];
+    for (let i = 0; i < chars.length; i += limit) r.push(chars.slice(i, i + limit).join(''));
+    return r;
+  });
+}
+export function subtitleLimit(text, cfg) {
+  if (cfg.srt_max_chars > 0) return cfg.srt_max_chars;
+  const t = stripTags(text);
+  const cjk = (t.match(CJK) || []).length;
+  return cjk > t.length * 0.3 ? 28 : 56;
+}
+/** 合併過短的句子 (逐句合成時減少請求數與不自然的短語音) */
+export function mergeShort(sentences, minChars) {
+  const out = [];
+  for (const s of sentences) {
+    if (out.length && [...stripTags(out[out.length - 1])].length < minChars) out[out.length - 1] += (/^[\x00-\x7F]/.test(s) ? ' ' : '') + s;
+    else out.push(s);
+  }
+  if (out.length > 1 && [...stripTags(out[out.length - 1])].length < minChars) {
+    const last = out.pop();
+    out[out.length - 1] += (/^[\x00-\x7F]/.test(last) ? ' ' : '') + last;
+  }
+  return out;
+}
+
+/** 找出音訊中的停頓 (安靜區間)。pcm 為 Int16Array。回傳 {silences:[{a,b}], lead, trail, dur} (秒) */
+export function findSilences(pcm, rate, { minMs = 110 } = {}) {
+  const frame = Math.max(1, Math.round(rate * 0.01));
+  const n = Math.floor(pcm.length / frame);
+  const dur = pcm.length / rate;
+  if (n < 4) return { silences: [], lead: 0, trail: dur, dur };
+  const rms = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    for (let j = 0; j < frame; j++) { const v = pcm[i * frame + j]; s += v * v; }
+    rms[i] = Math.sqrt(s / frame);
+  }
+  const sorted = Float64Array.from(rms).sort();
+  const p95 = sorted[Math.floor(n * 0.95)];
+  if (p95 < 4) return { silences: [], lead: 0, trail: dur, dur, flat: true };      // 幾乎全靜音:無法分析,呼叫端改用純比例
+  const thr = Math.max(Math.min(30, p95 * 0.25), p95 * 0.06);                      // 相對於音訊本身的響度 (低音量語音也適用)
+  const regions = [];
+  let start = -1;
+  for (let i = 0; i <= n; i++) {
+    const quiet = i < n && rms[i] < thr;
+    if (quiet && start < 0) start = i;
+    if (!quiet && start >= 0) { regions.push([start, i]); start = -1; }
+  }
+  const minF = Math.ceil(minMs / 10);
+  const reg = regions.filter(([a, b]) => b - a >= minF).map(([a, b]) => ({ a: (a * frame) / rate, b: (b * frame) / rate }));
+  let lead = 0, trail = dur;
+  if (reg.length && reg[0].a < 0.02) lead = reg[0].b;
+  if (reg.length && reg[reg.length - 1].b > dur - 0.02) trail = reg[reg.length - 1].a;
+  const inner = reg.filter((r) => r.a > lead + 0.05 && r.b < trail - 0.05);
+  return { silences: inner, lead, trail, dur };
+}
+
+/**
+ * 在 [t0, t1] 內為 units (已含 weight 秒數權重) 放置邊界,回傳每個 unit 的 {start,end} (秒)。
+ * 依權重估算句界,再吸附到附近較長的停頓;吸附後以剩餘部分重新校準,誤差不會累積。
+ */
+export function alignUnits(weights, t0, t1, silences) {
+  const n = weights.length;
+  const cues = [];
+  if (!n) return cues;
+  let cursor = t0;
+  let from = 0;
+  const bounds = [];                       // {end, next}
+  for (let k = 0; k < n - 1; k++) {
+    const rem = weights.slice(from).reduce((x, y) => x + y, 0) || 1;
+    const part = weights.slice(from, k + 1).reduce((x, y) => x + y, 0);
+    const target = cursor + (t1 - cursor) * (part / rem);
+    const avg = (t1 - cursor) / (n - k);
+    const win = Math.max(0.8, avg * 0.3);
+    let best = null, bestScore = Infinity;
+    for (const sil of silences) {
+      const mid = (sil.a + sil.b) / 2;
+      if (mid <= cursor + 0.25 || mid >= t1 - 0.2) continue;
+      const d = Math.abs(mid - target);
+      if (d > win) continue;
+      const score = d - 0.6 * (sil.b - sil.a);       // 越近、停頓越長越好 (句尾停頓通常比逗號長)
+      if (score < bestScore) { bestScore = score; best = sil; }
+    }
+    if (best) { bounds.push({ end: best.a, next: best.b }); cursor = (best.a + best.b) / 2; from = k + 1; }
+    else { bounds.push({ end: target, next: target }); cursor = target; from = k + 1; }
+  }
+  let prev = t0;
+  for (let i = 0; i < n; i++) {
+    const end = i < n - 1 ? bounds[i].end : t1;
+    cues.push({ start: prev, end: Math.max(end, prev + 0.2) });
+    prev = i < n - 1 ? bounds[i].next : t1;
+  }
+  return cues;
+}
+
+export function srtTime(sec) {
+  const ms = Math.max(0, Math.round(sec * 1000));
+  const p = (n, w = 2) => String(n).padStart(w, '0');
+  return `${p(Math.floor(ms / 3600000))}:${p(Math.floor(ms / 60000) % 60)}:${p(Math.floor(ms / 1000) % 60)},${p(ms % 1000, 3)}`;
+}
+export function toSrt(cues) {
+  return cues.map((c, i) => `${i + 1}\n${srtTime(c.start)} --> ${srtTime(c.end)}\n${c.text}\n`).join('\n');
+}
+
+/**
+ * 組出字幕。clips: [{ units:[{text(顯示用), raw(含標籤,用於權重), speaker}], pcm:Int16Array, rate, offset(秒) }]
+ * 每個 clip 是一段「長度已知的音訊」(逐段合成 = 每段一個 clip;單次請求 = 整份音訊一個 clip)。
+ */
+export function buildCues(clips, { speed = 1, speaker = true } = {}) {
+  const cues = [];
+  for (const clip of clips) {
+    const a = findSilences(clip.pcm, clip.rate);
+    if (a.trail - a.lead < 0.3) { a.lead = 0; a.trail = a.dur; a.silences = []; }     // 前後靜音判斷異常時,以整段音訊為範圍
+    const t0 = clip.offset + a.lead, t1 = clip.offset + a.trail;
+    const w = clip.units.map((u) => Math.max(0.3, estimateSpeechSeconds(u.raw)));
+    const sil = a.silences.map((s) => ({ a: s.a + clip.offset, b: s.b + clip.offset }));
+    const times = alignUnits(w, t0, Math.max(t1, t0 + 0.3), sil);
+    clip.units.forEach((u, i) => {
+      const prefix = speaker && u.speaker ? `${u.speaker}: ` : '';
+      cues.push({ start: times[i].start / speed, end: times[i].end / speed, text: prefix + stripTags(u.raw) });
+    });
+  }
+  return cues.filter((c) => c.text.trim());
+}
+
+// --------------------------------------------------------------------------- //
 // 進度:串流 (SSE) 與估算
 // 官方文件: stream:true 時,音訊以 step.delta 事件 (delta.type==='audio', delta.data 為 base64 的 24 kHz 單聲道 16-bit PCM) 分塊傳回。
 // 官方沒有「百分比」進度,所以顯示「已收到幾秒音訊」+ 依文字量估算的總長度 (估算值,僅供預期)。
@@ -448,13 +685,30 @@ async function streamPcm(streamApi, body, { signal, onOpen, onChunk }) {
 // --------------------------------------------------------------------------- //
 // API 呼叫
 // --------------------------------------------------------------------------- //
-const bodyFor = (model, input, speechConfig, rf) => ({ model, input, response_format: rf, generation_config: { speech_config: speechConfig } });
+const bodyFor = (model, input, speechConfig, rf, gen = {}) => ({ model, input, response_format: rf, generation_config: { ...gen, speech_config: speechConfig } });
+const curGen = (ctx) => { const o = { ...(ctx.gen || {}) }; for (const k of ctx.disabled || []) delete o[k]; return o; };
 
 /**
  * 合成一次。out: 'pcm' → 24 kHz 單聲道原始 PCM;'wav' → 含檔頭 WAV;'native' → 依 rf 原樣 (mulaw/alaw/自訂取樣率,不走串流)。
  * ctx.streamApi 可用且 cfg.stream !== false 時走串流 (取得即時進度);還沒收到任何音訊就失敗時,自動退回一般請求。
  */
-async function synth(ctx, { input, speechConfig, rf, out, segInfo = {}, estSec = 0, retries }) {
+async function synth(ctx, opts) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await synthInner(ctx, opts);
+    } catch (e) {
+      // 模型拒絕某個生成參數 (HTTP 400 且訊息提到參數名稱) → 停用該參數後重試,不讓整個生成失敗
+      const names = Object.keys(curGen(ctx)).filter((k) => new RegExp(`\\b${k}\\b`, 'i').test(e?.message || ''));
+      if (e?.status === 400 && names.length && attempt < 3 && !e.audioReceived) {
+        names.forEach((k) => ctx.disabled.add(k));
+        ctx.log?.(`模型不接受參數 ${names.join('、')},已略過這些參數後重試。`, 'warn');
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+async function synthInner(ctx, { input, speechConfig, rf, out, segInfo = {}, estSec = 0, retries }) {
   const { cfg, callApi, streamApi, hooks, onProgress } = ctx;
   const tag = (o) => ({ ...segInfo, ...o });
   if (streamApi && cfg.stream !== false && !ctx.streamBroken && out !== 'native') {
@@ -463,7 +717,7 @@ async function synth(ctx, { input, speechConfig, rf, out, segInfo = {}, estSec =
       return await withRetry(async () => {
         try {
           onProgress?.(tag({ stage: 'sent', mode: 'stream' }));
-          const body = { ...bodyFor(cfg.model, input, speechConfig, { type: 'audio', mime_type: 'audio/l16', sample_rate: PCM_RATE }), stream: true };
+          const body = { ...bodyFor(cfg.model, input, speechConfig, { type: 'audio', mime_type: 'audio/l16', sample_rate: PCM_RATE }, curGen(ctx)), stream: true };
           const r = await streamPcm(streamApi, body, {
             signal: hooks.signal,
             onOpen: () => onProgress?.(tag({ stage: 'accepted', mode: 'stream' })),
@@ -485,14 +739,14 @@ async function synth(ctx, { input, speechConfig, rf, out, segInfo = {}, estSec =
     }
   }
   onProgress?.(tag({ stage: 'sent', mode: 'unary' }));
-  const data = await withRetry(async () => extractAudio(await callApi(bodyFor(cfg.model, input, speechConfig, rf))), retries, hooks);
+  const data = await withRetry(async () => extractAudio(await callApi(bodyFor(cfg.model, input, speechConfig, rf, curGen(ctx)))), retries, hooks);
   onProgress?.(tag({ stage: 'received', mode: 'unary' }));
   return data;
 }
 
 /** 試聽等「單句合成」:回傳含檔頭的 WAV */
-export async function synthesizeOnce({ model, voice, style = '', text, callApi, streamApi, onProgress, signal, stream = true }) {
-  const ctx = { cfg: { model, stream }, callApi, streamApi, hooks: { signal }, onProgress, usage: [] };
+export async function synthesizeOnce({ model, voice, style = '', text, callApi, streamApi, onProgress, signal, stream = true, gen = {} }) {
+  const ctx = { cfg: { model, stream }, callApi, streamApi, hooks: { signal }, onProgress, usage: [], gen, disabled: new Set() };
   const input = makeInput([{ speaker: null, voice, style, text }], false);
   const wav = await synth(ctx, { input, speechConfig: [{ voice }], rf: { type: 'audio' }, out: 'wav', estSec: estimateSpeechSeconds(text), retries: 0 });
   return { wav, usage: mergeUsage(ctx.usage) };
@@ -531,6 +785,7 @@ async function generateSingleRequest(ctx, { segments, multi, needFf }) {
 async function generatePerTurn(ctx, { segments }) {
   const { cfg, onProgress } = ctx;
   const chunks = [];
+  const parts = [];
   const gap = new Uint8Array(2 * Math.floor(PCM_RATE * cfg.gap_ms / 1000));
   const rf = { type: 'audio', mime_type: 'audio/l16', sample_rate: PCM_RATE };
   for (let i = 0; i < segments.length; i++) {
@@ -541,8 +796,9 @@ async function generatePerTurn(ctx, { segments }) {
     const data = await synth(ctx, { input, speechConfig: [{ voice: s.voice }], rf, out: 'pcm', segInfo: info, estSec: estimateSpeechSeconds(s.text), retries: cfg.retries });
     if (i > 0 && gap.length) chunks.push(gap);
     chunks.push(data);
+    parts.push({ pcm: data, segment: s, gap: i > 0 ? gap.length / (PCM_RATE * 2) : 0 });
   }
-  return { data: pcmToWav(concatBytes(chunks), PCM_RATE), kind: 'wav' };
+  return { data: pcmToWav(concatBytes(chunks), PCM_RATE), kind: 'wav', parts };
 }
 
 // --------------------------------------------------------------------------- //
@@ -553,12 +809,41 @@ export function planGeneration(cfg, segments) {
   const custom = segments.some((s) => isCustomVoice(s.voice));
   const nSpeakers = multi ? new Set(segments.map((s) => s.speaker)).size : 1;
   const perTurn = (segments.length > 1 && !multi) ||
-    (multi && (cfg.force_per_turn || custom || cfg.speakers.length > 2 || nSpeakers > 2));
+    (multi && (cfg.force_per_turn || custom || cfg.speakers.length > 2 || nSpeakers > 2 || (cfg.srt === 'exact' && segments.length > 1)));
   const notes = [];
   if (multi && custom) notes.push('使用了自訂人聲 (voice_...),多人對話改為逐段合成後拼接。');
   if (multi && cfg.speakers.length > 2) notes.push('講者超過 2 位,改為逐段合成後拼接。');
-  if (!multi && segments.length > 1) notes.push(`文本已自動分成 ${segments.length} 段,將逐段合成後拼接。`);
+  if (!multi && segments.length > 1) notes.push(cfg.srt === 'exact' ? `字幕精準模式:文本分成 ${segments.length} 句,每句各自合成後拼接 (時間軸精準,但請求次數較多)。` : `文本已自動分成 ${segments.length} 段,將逐段合成後拼接。`);
+  if (multi && cfg.srt === 'exact' && segments.length > 1 && !(cfg.force_per_turn || custom || cfg.speakers.length > 2)) notes.push(`字幕精準模式:對話分成 ${segments.length} 句,每句各自合成後拼接。`);
   return { multi, perTurn, notes };
+}
+
+function makeSubtitles({ cfg, segments, gen, perTurn, multi }) {
+  const limitOf = (t) => subtitleLimit(t, cfg);
+  const speed = Math.abs((cfg.speed || 1) - 1) > 1e-6 ? cfg.speed : 1;
+  const unitsOf = (seg) => wrapUnits(splitSentences(seg.text), limitOf(seg.text)).map((raw) => ({ raw, speaker: multi ? seg.speaker : null }));
+  let clips = [];
+  if (perTurn) {
+    let offset = 0;
+    for (const part of gen.parts) {
+      offset += part.gap;
+      const pcm = new Int16Array(part.pcm.buffer, part.pcm.byteOffset, Math.floor(part.pcm.byteLength / 2));
+      clips.push({ units: unitsOf(part.segment), pcm, rate: PCM_RATE, offset });
+      offset += part.pcm.byteLength / (PCM_RATE * 2);
+    }
+  } else {
+    let pcmBytes, rate = PCM_RATE;
+    const kind = gen.kind;
+    if (kind === 'wav') { const info = wavInfo(gen.data); rate = info.rate; pcmBytes = wavToPcm(gen.data); }
+    else if (kind === 'pcm') { rate = Number(cfg.sample_rate) || PCM_RATE; pcmBytes = gen.data; }
+    else return null;
+    const aligned = pcmBytes.byteOffset % 2 === 0 ? pcmBytes : pcmBytes.slice();
+    clips = [{ units: segments.flatMap(unitsOf), pcm: new Int16Array(aligned.buffer, aligned.byteOffset, Math.floor(aligned.byteLength / 2)), rate, offset: 0 }];
+  }
+  const cues = buildCues(clips, { speed, speaker: cfg.srt_speaker !== false });
+  const allKnown = clips.every((c) => c.units.length === 1);               // 每條字幕對應一段「長度已知」的音訊
+  const mode = allKnown ? 'exact' : cfg.srt === 'exact' ? 'mixed' : 'estimate';
+  return { srt: toSrt(cues), cues, mode, exact: mode === 'exact' };
 }
 
 /**
@@ -573,9 +858,12 @@ export function planGeneration(cfg, segments) {
  */
 export async function runPipeline({ cfg, text, callApi, streamApi, ffmpeg, onProgress, onLog, signal }) {
   const log = (m, level = 'info') => onLog?.(m, level);
-  const segments = buildSegments(cfg, text);
+  const segments = cfg.srt === 'exact' ? buildSegmentsExact(cfg, text) : buildSegments(cfg, text);
   const { multi, perTurn, notes } = planGeneration(cfg, segments);
   notes.forEach((n) => log(n));
+  const genInfo = buildGenParams(cfg);
+  if (genInfo.errors.length) throw new Error('生成參數有誤: ' + genInfo.errors.join(';'));
+  if (Object.keys(genInfo.params).length) log(`生成參數: ${JSON.stringify(genInfo.params)}${cfg.gen_seed_auto && genInfo.seed !== null && cfg.gen_seed === '' ? '(種子為自動指定,填入「seed」即可重現)' : ''}`);
 
   const runCfg = { ...cfg };
   let needFf = needsFfmpeg(runCfg, perTurn);
@@ -593,7 +881,7 @@ export async function runPipeline({ cfg, text, callApi, streamApi, ffmpeg, onPro
     signal,
     onRetry: (e, wait, n, total) => log(`失敗 (${e.message});${wait} 秒後重試 (${n}/${total})`, 'warn'),
   };
-  const ctx = { cfg: runCfg, callApi, streamApi, hooks, onProgress, log, usage: [], streamBroken: false };
+  const ctx = { cfg: runCfg, callApi, streamApi, hooks, onProgress, log, usage: [], streamBroken: false, gen: genInfo.params, disabled: new Set() };
   onProgress?.({ stage: 'tts-start', perTurn, n: segments.length, estSec: estimateSpeechSeconds(segments.map((s) => s.text).join(' ')) });
   const gen = perTurn ? await generatePerTurn(ctx, { segments }) : await generateSingleRequest(ctx, { segments, multi, needFf });
 
@@ -620,7 +908,15 @@ export async function runPipeline({ cfg, text, callApi, streamApi, ffmpeg, onPro
       if (!outputs.length) outputs.push({ label: '原始 WAV (轉檔失敗)', bytes: gen.data, fmt: 'wav', ...outputMeta('wav') });
     }
   }
-  return { outputs, runCfg, perTurn, segments, usage: mergeUsage(ctx.usage) };
+  let subtitles = null;
+  if (cfg.srt && cfg.srt !== 'off') {
+    try {
+      subtitles = makeSubtitles({ cfg: runCfg, segments, gen, perTurn, multi });
+      if (subtitles) outputs.push({ label: `SRT 字幕（${{ exact: '逐句合成，時間軸精準', mixed: '逐句合成；句內再分條的部分為估算', estimate: '估算：依字數與停頓偵測對齊' }[subtitles.mode]}）`, bytes: new TextEncoder().encode(subtitles.srt), fmt: 'srt', ext: '.srt', mime: 'application/x-subrip', playable: false });
+      else log('這個輸出格式 (mulaw/alaw) 無法分析音訊,略過字幕。', 'warn');
+    } catch (e) { log(`字幕產生失敗: ${e.message} (音訊不受影響)`, 'error'); }
+  }
+  return { outputs, runCfg, perTurn, segments, usage: mergeUsage(ctx.usage), subtitles, usedParams: curGen(ctx), droppedParams: [...ctx.disabled] };
 }
 
 // --------------------------------------------------------------------------- //
